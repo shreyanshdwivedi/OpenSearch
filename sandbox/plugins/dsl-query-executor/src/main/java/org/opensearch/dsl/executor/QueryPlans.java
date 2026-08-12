@@ -25,7 +25,9 @@ public final class QueryPlans {
         /** Document hits. */
         HITS,
         /** Aggregation results. */
-        AGGREGATION
+        AGGREGATION,
+        /** Total match count for {@code hits.total} (emitted when hits are skipped, i.e. size=0). */
+        COUNT
     }
 
     /**
