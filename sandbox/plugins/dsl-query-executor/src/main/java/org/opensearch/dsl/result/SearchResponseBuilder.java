@@ -46,7 +46,7 @@ public class SearchResponseBuilder {
         long tookInMillis
     ) throws ConversionException {
 
-        SearchHits hits = buildHits(results);
+        SearchHits hits = HitsResponseBuilder.build(results, request);
         InternalAggregations aggregations = buildAggregations(results, request, registry);
 
         SearchResponseSections sections = new SearchResponseSections(hits, aggregations, null, false, null, null, 0);
@@ -55,11 +55,6 @@ public class SearchResponseBuilder {
         // the analytics plugin (returned alongside rows). Until then report a constant 1/1 —
         // the analytics path has no per-shard fan-out to report.
         return new SearchResponse(sections, null, 1, 1, 0, tookInMillis, ShardSearchFailure.EMPTY_ARRAY, SearchResponse.Clusters.EMPTY);
-    }
-
-    private static SearchHits buildHits(List<ExecutionResult> results) {
-        // TODO: Build hits from HITS results
-        return SearchHits.empty(true);
     }
 
     private static InternalAggregations buildAggregations(

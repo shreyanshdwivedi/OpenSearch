@@ -40,9 +40,9 @@
     "hits": {
       "total": {
         "value": 0,
-        "relation": "eq"
+        "relation": "gte"
       },
-      "max_score": 0.0,
+      "max_score": null,
       "hits": []
     },
     "aggregations": {

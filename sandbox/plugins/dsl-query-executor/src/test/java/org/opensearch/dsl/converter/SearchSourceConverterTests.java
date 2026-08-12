@@ -10,6 +10,7 @@ package org.opensearch.dsl.converter;
 
 import org.apache.calcite.jdbc.CalciteSchema;
 import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.logical.LogicalAggregate;
 import org.apache.calcite.rel.logical.LogicalSort;
 import org.apache.calcite.rel.logical.LogicalTableScan;
 import org.apache.calcite.rel.type.RelDataType;
@@ -72,8 +73,12 @@ public class SearchSourceConverterTests extends OpenSearchTestCase {
         assertEquals(1, plans.getAll().size());
         assertTrue(plans.has(QueryPlans.Type.HITS));
 
+        // Even a default request carries fetch=size (10) so the limit pushes down to the engine.
         QueryPlans.QueryPlan plan = plans.get(QueryPlans.Type.HITS).get(0);
-        assertTrue(plan.relNode() instanceof LogicalTableScan);
+        assertTrue(plan.relNode() instanceof LogicalSort);
+        LogicalSort sort = (LogicalSort) plan.relNode();
+        assertNotNull(sort.fetch);
+        assertTrue(sort.getInput() instanceof LogicalTableScan);
     }
 
     public void testConvertResolvesFieldNames() throws ConversionException {
@@ -88,12 +93,13 @@ public class SearchSourceConverterTests extends OpenSearchTestCase {
         expectThrows(IllegalArgumentException.class, () -> converter.convert(new SearchSourceBuilder(), "nonexistent-index"));
     }
 
-    public void testAggsWithSizeZeroProducesOnlyAggregationPlan() throws ConversionException {
+    public void testAggsWithSizeZeroProducesCountAndAggregationPlans() throws ConversionException {
         SearchSourceBuilder source = new SearchSourceBuilder().size(0).aggregation(new AvgAggregationBuilder("avg_price").field("price"));
         QueryPlans plans = converter.convert(source, "test-index");
 
-        assertEquals(1, plans.getAll().size());
+        assertEquals(2, plans.getAll().size());
         assertFalse(plans.has(QueryPlans.Type.HITS));
+        assertTrue(plans.has(QueryPlans.Type.COUNT));
         assertTrue(plans.has(QueryPlans.Type.AGGREGATION));
     }
 
@@ -104,6 +110,7 @@ public class SearchSourceConverterTests extends OpenSearchTestCase {
         assertEquals(2, plans.getAll().size());
         assertTrue(plans.has(QueryPlans.Type.HITS));
         assertTrue(plans.has(QueryPlans.Type.AGGREGATION));
+        assertFalse(plans.has(QueryPlans.Type.COUNT));
     }
 
     public void testNoAggsProducesOnlyHitsPlan() throws ConversionException {
@@ -114,14 +121,17 @@ public class SearchSourceConverterTests extends OpenSearchTestCase {
         assertFalse(plans.has(QueryPlans.Type.AGGREGATION));
     }
 
-    public void testSizeZeroNoAggsProducesNoPlans() throws ConversionException {
-        // size=0 with no aggs produces no plans — total doc count comes from analytics plugin metadata
+    /** size=0 is a count query: legacy still reports the exact match count in hits.total. */
+    public void testSizeZeroProducesCountPlan() throws ConversionException {
         SearchSourceBuilder source = new SearchSourceBuilder().size(0);
         QueryPlans plans = converter.convert(source, "test-index");
 
-        assertEquals(0, plans.getAll().size());
+        assertEquals(1, plans.getAll().size());
         assertFalse(plans.has(QueryPlans.Type.HITS));
-        assertFalse(plans.has(QueryPlans.Type.AGGREGATION));
+
+        QueryPlans.QueryPlan countPlan = plans.get(QueryPlans.Type.COUNT).get(0);
+        assertTrue(countPlan.relNode() instanceof LogicalAggregate);
+        assertEquals(List.of(SearchSourceConverter.TOTAL_COUNT_FIELD), countPlan.relNode().getRowType().getFieldNames());
     }
 
     public void testAggPlanIncludesPostAggSort() throws ConversionException {

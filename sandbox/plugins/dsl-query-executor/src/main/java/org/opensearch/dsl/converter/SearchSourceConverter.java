@@ -15,13 +15,19 @@ import org.apache.calcite.plan.RelOptTable;
 import org.apache.calcite.plan.hep.HepPlanner;
 import org.apache.calcite.plan.hep.HepProgram;
 import org.apache.calcite.prepare.CalciteCatalogReader;
+import org.apache.calcite.rel.RelCollations;
 import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.core.AggregateCall;
+import org.apache.calcite.rel.logical.LogicalAggregate;
 import org.apache.calcite.rel.logical.LogicalTableScan;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rel.type.RelDataTypeSystem;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.schema.SchemaPlus;
+import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.type.SqlTypeFactoryImpl;
+import org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.calcite.util.ImmutableBitSet;
 import org.opensearch.dsl.aggregation.AggregationMetadata;
 import org.opensearch.dsl.aggregation.AggregationRegistry;
 import org.opensearch.dsl.aggregation.AggregationRegistryFactory;
@@ -47,6 +53,9 @@ public class SearchSourceConverter {
     /** Immutable after creation with stateless translators — shared across all requests. */
     private static final QueryRegistry QUERY_REGISTRY = QueryRegistryFactory.create();
     private static final AggregationRegistry AGG_REGISTRY = AggregationRegistryFactory.create();
+
+    /** Output column name of the COUNT plan emitted for size=0 requests. */
+    public static final String TOTAL_COUNT_FIELD = "_total_count";
 
     private final RelOptCluster cluster;
     private final CalciteCatalogReader catalogReader;
@@ -117,11 +126,15 @@ public class SearchSourceConverter {
         QueryPlans.Builder builder = new QueryPlans.Builder();
 
         // Hits path: Scan → Filter → Project → Sort
-        // size=0 skips hits — total doc count comes from analytics plugin metadata
         if (size > 0) {
             RelNode hits = projectConverter.convert(base, ctx);
             hits = sortConverter.convert(hits, ctx);
             builder.add(new QueryPlans.QueryPlan(QueryPlans.Type.HITS, hits));
+        } else {
+            // size=0 skips hits, but legacy still reports the exact match count in hits.total
+            // (size=0 requests are count queries). Emit a COUNT(*) plan in the hits slot; the
+            // response builder consumes it for total {n, eq}.
+            builder.add(new QueryPlans.QueryPlan(QueryPlans.Type.COUNT, buildCountPlan(base)));
         }
 
         // Aggregation path: Scan → Filter → Aggregate → PostAggregate (one per granularity level)
@@ -146,5 +159,25 @@ public class SearchSourceConverter {
         return searchSource.aggregations() != null
             && searchSource.aggregations().getAggregatorFactories() != null
             && !searchSource.aggregations().getAggregatorFactories().isEmpty();
+    }
+
+    /**
+     * Builds a global {@code COUNT(*)} over the shared base (scan + filter): the SQL equivalent
+     * of legacy's match counting, which runs even when no hits are fetched.
+     */
+    private RelNode buildCountPlan(RelNode base) {
+        RelDataTypeFactory typeFactory = cluster.getTypeFactory();
+        AggregateCall countCall = AggregateCall.create(
+            SqlStdOperatorTable.COUNT,
+            false,
+            false,
+            false,
+            List.of(),
+            -1,
+            RelCollations.EMPTY,
+            typeFactory.createSqlType(SqlTypeName.BIGINT),
+            TOTAL_COUNT_FIELD
+        );
+        return LogicalAggregate.create(base, ImmutableBitSet.of(), null, List.of(countCall));
     }
 }

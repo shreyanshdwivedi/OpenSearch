@@ -8,6 +8,7 @@
 
 package org.opensearch.dsl.result;
 
+import org.apache.lucene.search.TotalHits;
 import org.opensearch.action.search.SearchRequest;
 import org.opensearch.action.search.SearchResponse;
 import org.opensearch.common.settings.Settings;
@@ -298,6 +299,40 @@ public class SearchResponseBuilderTests extends OpenSearchTestCase {
         StringTerms byBrandCat2 = catFirst.getBuckets().get(1).getAggregations().get("by_brand");
         InternalSum sumCat2 = byBrandCat2.getBuckets().get(0).getAggregations().get("sum_price");
         assertEquals(700.0, sumCat2.getValue(), 0.0);
+    }
+
+    /**
+     * size=0 with aggregations: the COUNT plan's result supplies the exact match count in
+     * hits.total (legacy parity), alongside the aggregation results.
+     */
+    public void testSizeZeroReportsExactTotalFromCountPlan() throws Exception {
+        Map<String, String> mapping = new java.util.LinkedHashMap<>();
+        mapping.put("brand", "VARCHAR");
+        CalciteTestInfra.InfraResult infra = CalciteTestInfra.buildFromMapping("products", mapping);
+
+        SearchSourceBuilder source = new SearchSourceBuilder().size(0).aggregation(AggregationBuilders.terms("by_brand").field("brand"));
+
+        SearchSourceConverter converter = new SearchSourceConverter(infra.schema());
+        QueryPlans plans = converter.convert(source, "products");
+        assertTrue(plans.has(QueryPlans.Type.COUNT));
+
+        List<ExecutionResult> results = new ArrayList<>();
+        results.add(new ExecutionResult(plans.get(QueryPlans.Type.COUNT).get(0), List.<Object[]>of(new Object[] { 5L })));
+        for (QueryPlans.QueryPlan plan : plans.get(QueryPlans.Type.AGGREGATION)) {
+            assertEquals(List.of("brand", "_count"), plan.relNode().getRowType().getFieldNames());
+            results.add(new ExecutionResult(plan, List.of(new Object[] { "BrandA", 3L }, new Object[] { "BrandB", 2L })));
+        }
+
+        SearchRequest request = new SearchRequest("products");
+        request.source(source);
+        SearchResponse response = SearchResponseBuilder.build(results, request, converter.getAggregationRegistry(), 1L);
+
+        assertEquals(0, response.getHits().getHits().length);
+        assertEquals(5L, response.getHits().getTotalHits().value());
+        assertEquals(TotalHits.Relation.EQUAL_TO, response.getHits().getTotalHits().relation());
+
+        StringTerms byBrand = response.getAggregations().get("by_brand");
+        assertEquals(2, byBrand.getBuckets().size());
     }
 
     /** Terms {@code size} truncates to the top-N buckets and reports the rest as sum_other_doc_count. */
