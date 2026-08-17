@@ -12,12 +12,14 @@ import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.logical.LogicalTableScan;
 import org.apache.lucene.search.TotalHits;
 import org.opensearch.action.search.SearchRequest;
+import org.opensearch.analytics.exec.ExecutionTotals;
 import org.opensearch.dsl.converter.ConversionException;
 import org.opensearch.dsl.executor.QueryPlans;
 import org.opensearch.dsl.golden.CalciteTestInfra;
 import org.opensearch.search.SearchHit;
 import org.opensearch.search.SearchHits;
 import org.opensearch.search.builder.SearchSourceBuilder;
+import org.opensearch.search.sort.SortOrder;
 import org.opensearch.test.OpenSearchTestCase;
 
 import java.util.LinkedHashMap;
@@ -190,6 +192,89 @@ public class HitsResponseBuilderTests extends OpenSearchTestCase {
         SearchHits hits = HitsResponseBuilder.build(List.of(result), request(10));
 
         assertEquals(Map.of("name", "laptop"), hits.getHits()[0].getSourceAsMap());
+    }
+
+    /** Engine-computed totals (track_total_hits gate) are used for sorted requests. */
+    public void testEngineTotalsUsedForSortedRequests() throws Exception {
+        ExecutionResult result = new ExecutionResult(
+            hitsPlan(PRODUCTS_MAPPING),
+            new RowsWithTotalsForTest(List.<Object[]>of(new Object[] { "laptop", 999, "BrandA" }), new ExecutionTotals(42_000L, true))
+        );
+
+        SearchHits hits = HitsResponseBuilder.build(List.of(result), sortedRequest(10));
+
+        assertEquals(1, hits.getHits().length);
+        assertEquals(42_000L, hits.getTotalHits().value());
+        assertEquals(TotalHits.Relation.EQUAL_TO, hits.getTotalHits().relation());
+    }
+
+    /** Inexact engine totals (dynamic-filter pruning) surface as a gte lower bound. */
+    public void testInexactEngineTotalsReportGte() throws Exception {
+        ExecutionResult result = new ExecutionResult(
+            hitsPlan(PRODUCTS_MAPPING),
+            new RowsWithTotalsForTest(List.<Object[]>of(new Object[] { "laptop", 999, "BrandA" }), new ExecutionTotals(42_000L, false))
+        );
+
+        SearchHits hits = HitsResponseBuilder.build(List.of(result), sortedRequest(10));
+
+        assertEquals(42_000L, hits.getTotalHits().value());
+        assertEquals(TotalHits.Relation.GREATER_THAN_OR_EQUAL_TO, hits.getTotalHits().relation());
+    }
+
+    /** Unsorted requests ignore engine totals: their fragments can stop early and undercount. */
+    public void testEngineTotalsIgnoredForUnsortedRequests() throws Exception {
+        ExecutionResult result = new ExecutionResult(
+            hitsPlan(PRODUCTS_MAPPING),
+            new RowsWithTotalsForTest(List.<Object[]>of(new Object[] { "laptop", 999, "BrandA" }), new ExecutionTotals(42_000L, true))
+        );
+
+        SearchHits hits = HitsResponseBuilder.build(List.of(result), request(10));
+
+        // Falls back to page inference: 1 row < size 10 -> exact 1.
+        assertEquals(1L, hits.getTotalHits().value());
+        assertEquals(TotalHits.Relation.EQUAL_TO, hits.getTotalHits().relation());
+    }
+
+    /** A totals value below the returned row count is nonsense - fall back to inference. */
+    public void testImplausibleEngineTotalsIgnored() throws Exception {
+        ExecutionResult result = new ExecutionResult(
+            hitsPlan(PRODUCTS_MAPPING),
+            new RowsWithTotalsForTest(
+                List.of(new Object[] { "laptop", 999, "BrandA" }, new Object[] { "phone", 699, "BrandB" }),
+                new ExecutionTotals(1L, true)
+            )
+        );
+
+        SearchHits hits = HitsResponseBuilder.build(List.of(result), sortedRequest(10));
+
+        assertEquals(2L, hits.getTotalHits().value());
+    }
+
+    private static SearchRequest sortedRequest(int size) {
+        SearchRequest request = new SearchRequest("products");
+        request.source(new SearchSourceBuilder().size(size).sort("price", SortOrder.DESC));
+        return request;
+    }
+
+    /** Test stand-in for the engine's rows-with-totals wrapper. */
+    private static final class RowsWithTotalsForTest implements Iterable<Object[]>, ExecutionTotals.Holder {
+        private final List<Object[]> rows;
+        private final ExecutionTotals totals;
+
+        RowsWithTotalsForTest(List<Object[]> rows, ExecutionTotals totals) {
+            this.rows = rows;
+            this.totals = totals;
+        }
+
+        @Override
+        public java.util.Iterator<Object[]> iterator() {
+            return rows.iterator();
+        }
+
+        @Override
+        public ExecutionTotals executionTotals() {
+            return totals;
+        }
     }
 
     public void testRowCellCountMismatchThrows() {

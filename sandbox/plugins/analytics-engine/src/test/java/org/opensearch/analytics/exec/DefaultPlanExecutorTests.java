@@ -38,6 +38,67 @@ public class DefaultPlanExecutorTests extends OpenSearchTestCase {
 
     private BufferAllocator allocator;
 
+    // ---- totalsFromShardMetrics: per-shard rows_matched summing for hits.total ----
+
+    private static byte[] metricsJson(String json) {
+        return json.getBytes(StandardCharsets.UTF_8);
+    }
+
+    public void testTotalsSumsRowsMatchedAcrossShards() {
+        ExecutionTotals totals = DefaultPlanExecutor.totalsFromShardMetrics(
+            List.of(metricsJson("{\"rows_matched\": 100}"), metricsJson("{\"rows_matched\": 250}"))
+        );
+        assertNotNull(totals);
+        assertEquals(350L, totals.value());
+        assertTrue(totals.exact());
+    }
+
+    public void testTotalsInexactWhenDynamicFilterPrunedRowGroups() {
+        ExecutionTotals totals = DefaultPlanExecutor.totalsFromShardMetrics(
+            List.of(
+                metricsJson("{\"rows_matched\": 100}"),
+                metricsJson("{\"rows_matched\": 40, \"dynamic_filter_rg_pruned_at_prefetch\": 2}")
+            )
+        );
+        assertNotNull(totals);
+        assertEquals(140L, totals.value());
+        assertFalse("pruned row groups were never evaluated - count is a lower bound", totals.exact());
+    }
+
+    public void testTotalsInexactOnPollPhasePruning() {
+        ExecutionTotals totals = DefaultPlanExecutor.totalsFromShardMetrics(
+            List.of(metricsJson("{\"rows_matched\": 40, \"dynamic_filter_rg_pruned_at_poll\": 1}"))
+        );
+        assertNotNull(totals);
+        assertFalse(totals.exact());
+    }
+
+    public void testTotalsNullWhenAShardLacksTheMetric() {
+        // Fragment without an indexed scan (e.g. no filter) has no rows_matched — an
+        // incomplete sum would be misleading, so no totals at all.
+        assertNull(
+            DefaultPlanExecutor.totalsFromShardMetrics(
+                List.of(metricsJson("{\"rows_matched\": 100}"), metricsJson("{\"elapsed_compute\": 5}"))
+            )
+        );
+    }
+
+    public void testTotalsNullWhenMetricsMissingOrUnparseable() {
+        assertNull(DefaultPlanExecutor.totalsFromShardMetrics(new ArrayList<>()));
+        List<byte[]> withNull = new ArrayList<>();
+        withNull.add(null);
+        assertNull(DefaultPlanExecutor.totalsFromShardMetrics(withNull));
+        assertNull(DefaultPlanExecutor.totalsFromShardMetrics(List.of(metricsJson("not json"))));
+    }
+
+    public void testTotalsIgnoresNonNumericEntries() {
+        ExecutionTotals totals = DefaultPlanExecutor.totalsFromShardMetrics(
+            List.of(metricsJson("{\"rows_matched\": 7, \"physical_plan\": \"IndexedExec...\"}"))
+        );
+        assertNotNull(totals);
+        assertEquals(7L, totals.value());
+    }
+
     @Override
     public void setUp() throws Exception {
         super.setUp();

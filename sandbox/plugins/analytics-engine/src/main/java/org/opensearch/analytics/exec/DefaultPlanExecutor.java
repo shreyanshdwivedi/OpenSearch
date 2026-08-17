@@ -31,6 +31,9 @@ import org.opensearch.analytics.exec.action.AnalyticsQueryResponse;
 import org.opensearch.analytics.exec.profile.ProfiledResult;
 import org.opensearch.analytics.exec.profile.QueryProfile;
 import org.opensearch.analytics.exec.profile.QueryProfileBuilder;
+import org.opensearch.analytics.exec.stage.StageExecution;
+import org.opensearch.analytics.exec.stage.StageTask;
+import org.opensearch.analytics.exec.stage.shard.ShardFragmentStageExecution;
 import org.opensearch.analytics.exec.task.AnalyticsQueryTask;
 import org.opensearch.analytics.planner.CapabilityRegistry;
 import org.opensearch.analytics.planner.PlannerContext;
@@ -51,9 +54,13 @@ import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.common.unit.TimeValue;
+import org.opensearch.common.xcontent.XContentType;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.rest.RestStatus;
 import org.opensearch.core.tasks.TaskId;
+import org.opensearch.core.xcontent.DeprecationHandler;
+import org.opensearch.core.xcontent.NamedXContentRegistry;
+import org.opensearch.core.xcontent.XContentParser;
 import org.opensearch.search.SearchService;
 import org.opensearch.tasks.Task;
 import org.opensearch.threadpool.ThreadPool;
@@ -61,7 +68,9 @@ import org.opensearch.transport.TransportService;
 import org.opensearch.transport.client.node.NodeClient;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -101,6 +110,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
     private volatile int preFilterShardSize;
     private volatile int maxConcurrentShardRequestsPerNode;
     private volatile boolean preferMetadataDriver;
+    private volatile boolean trackTotalHitsEnabled;
     private final PlannerSettings plannerSettings;
     private final IndexNameExpressionResolver indexNameExpressionResolver;
     private final AnalyticsSearchSlowLog analyticsSearchSlowLog;
@@ -155,6 +165,9 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         this.preferMetadataDriver = AnalyticsPlugin.PREFER_METADATA_DRIVER.get(clusterService.getSettings());
         clusterService.getClusterSettings()
             .addSettingsUpdateConsumer(AnalyticsPlugin.PREFER_METADATA_DRIVER, v -> preferMetadataDriver = v);
+        this.trackTotalHitsEnabled = AnalyticsQuerySettings.TRACK_TOTAL_HITS_ENABLED.get(clusterService.getSettings());
+        clusterService.getClusterSettings()
+            .addSettingsUpdateConsumer(AnalyticsQuerySettings.TRACK_TOTAL_HITS_ENABLED, v -> trackTotalHitsEnabled = v);
         // Planner settings (oversampling factor + delegation block-list); self-registers update
         // consumers for live changes.
         this.plannerSettings = PlannerSettings.create(
@@ -336,6 +349,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
             planningTimeMs,
             statsCollector,
             profile,
+            trackTotalHitsEnabled,
             listener
         );
 
@@ -378,6 +392,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         long planningTimeMs,
         AnalyticsStatsCollector statsCollector,
         boolean includeProfileInResponse,
+        boolean trackTotalHits,
         ActionListener<ProfiledResult> listener
     ) {
         return ActionListener.wrap(rows -> {
@@ -390,7 +405,14 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
             QueryProfile qp = includeProfileInResponse && graph != null
                 ? QueryProfileBuilder.snapshot(graph, context, fullPlan, planningTimeMs)
                 : null;
-            listener.onResponse(new ProfiledResult(rows, null, qp));
+            Iterable<Object[]> outRows = rows;
+            if (trackTotalHits && graph != null && rows != null) {
+                ExecutionTotals totals = totalsFromGraph(graph);
+                if (totals != null) {
+                    outRows = new RowsWithTotals(rows, totals);
+                }
+            }
+            listener.onResponse(new ProfiledResult(outRows, null, qp));
         }, e -> {
             QueryExecution exec = execRef.get();
             ExecutionGraph graph = exec != null ? exec.getGraph() : null;
@@ -533,5 +555,80 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
             ordered.add(vector);
         }
         return ordered;
+    }
+
+    /** Metric key for per-shard match counts (bitset matches before parquet read / LIMIT). */
+    static final String ROWS_MATCHED_METRIC = "rows_matched";
+    /** Metric keys for row groups skipped by the runtime dynamic filter (TopK min-competitive). */
+    static final String DF_PRUNED_PREFETCH_METRIC = "dynamic_filter_rg_pruned_at_prefetch";
+    static final String DF_PRUNED_POLL_METRIC = "dynamic_filter_rg_pruned_at_poll";
+
+    /**
+     * Sums per-shard {@code rows_matched} across all shard-fragment stage tasks into
+     * {@link ExecutionTotals}. Returns null when any shard task lacks the metric (fragment had
+     * no indexed scan, or metrics didn't arrive) — an incomplete sum would be misleading.
+     */
+    static ExecutionTotals totalsFromGraph(ExecutionGraph graph) {
+        List<byte[]> metricsPerTask = new ArrayList<>();
+        for (StageExecution exec : graph.allExecutions()) {
+            if ((exec instanceof ShardFragmentStageExecution) == false) {
+                continue;
+            }
+            for (StageTask task : exec.tasks()) {
+                metricsPerTask.add(task.dataNodeMetrics());
+            }
+        }
+        return totalsFromShardMetrics(metricsPerTask);
+    }
+
+    /**
+     * Pure summing logic over per-shard-task metrics JSON. Null when the list is empty or any
+     * entry is missing/unparseable/lacks {@code rows_matched}.
+     *
+     * <p>The count is exact unless a shard skipped row groups via the runtime dynamic filter
+     * (TopK min-competitive pruning, the analog of Lucene's WAND early-termination) — those row
+     * groups were never evaluated, so their matches are unknown and the sum is a lower bound.
+     */
+    static ExecutionTotals totalsFromShardMetrics(List<byte[]> metricsPerShardTask) {
+        if (metricsPerShardTask.isEmpty()) {
+            return null;
+        }
+        long total = 0;
+        boolean exact = true;
+        for (byte[] json : metricsPerShardTask) {
+            Map<String, Long> metrics = parseNumericMetrics(json);
+            Long matched = metrics == null ? null : metrics.get(ROWS_MATCHED_METRIC);
+            if (matched == null) {
+                return null;
+            }
+            total += matched;
+            long pruned = metrics.getOrDefault(DF_PRUNED_PREFETCH_METRIC, 0L) + metrics.getOrDefault(DF_PRUNED_POLL_METRIC, 0L);
+            if (pruned > 0) {
+                exact = false;
+            }
+        }
+        return new ExecutionTotals(total, exact);
+    }
+
+    /** Parses the data-node metrics JSON into its numeric entries; null when absent/unparseable. */
+    private static Map<String, Long> parseNumericMetrics(byte[] json) {
+        if (json == null || json.length == 0) {
+            return null;
+        }
+        try (
+            XContentParser parser = XContentType.JSON.xContent()
+                .createParser(NamedXContentRegistry.EMPTY, DeprecationHandler.IGNORE_DEPRECATIONS, json)
+        ) {
+            Map<String, Object> raw = parser.map();
+            Map<String, Long> out = new HashMap<>();
+            for (Map.Entry<String, Object> entry : raw.entrySet()) {
+                if (entry.getValue() instanceof Number n) {
+                    out.put(entry.getKey(), n.longValue());
+                }
+            }
+            return out;
+        } catch (Exception e) {
+            return null;
+        }
     }
 }

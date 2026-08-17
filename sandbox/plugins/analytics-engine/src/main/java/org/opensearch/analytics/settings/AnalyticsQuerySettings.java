@@ -115,8 +115,28 @@ public final class AnalyticsQuerySettings {
         Setting.Property.Dynamic
     );
 
+    /**
+     * When enabled, data nodes attach fragment execution metrics to every fragment stream
+     * (not just profiled ones) and the coordinator sums per-shard {@code rows_matched} into
+     * {@link org.opensearch.analytics.exec.ExecutionTotals} carried alongside result rows —
+     * the basis for exact {@code hits.total} reporting. Default off: counting is experimental
+     * and per-query cost is still being measured.
+     */
+    public static final Setting<Boolean> TRACK_TOTAL_HITS_ENABLED = Setting.boolSetting(
+        "analytics.query.track_total_hits.enabled",
+        false,
+        Setting.Property.NodeScope,
+        Setting.Property.Dynamic
+    );
+
     public static List<Setting<?>> all() {
-        return List.of(DELEGATION_BLOCKED_PREDICATES, MAX_SHARDS_PER_QUERY, PRE_FILTER_SHARD_SIZE, MAX_CONCURRENT_SHARD_REQUESTS_PER_NODE);
+        return List.of(
+            DELEGATION_BLOCKED_PREDICATES,
+            MAX_SHARDS_PER_QUERY,
+            PRE_FILTER_SHARD_SIZE,
+            MAX_CONCURRENT_SHARD_REQUESTS_PER_NODE,
+            TRACK_TOTAL_HITS_ENABLED
+        );
     }
 
     private AnalyticsQuerySettings() {}

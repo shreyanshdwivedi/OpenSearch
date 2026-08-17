@@ -185,6 +185,17 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
             namedWriteableRegistry,
             readerContextStore
         );
+        // track_total_hits gate: data nodes attach fragment metrics (rows_matched) to every
+        // stream while enabled; the coordinator side reads the same setting in DefaultPlanExecutor.
+        final java.util.concurrent.atomic.AtomicBoolean trackTotalHits = new java.util.concurrent.atomic.AtomicBoolean(
+            org.opensearch.analytics.settings.AnalyticsQuerySettings.TRACK_TOTAL_HITS_ENABLED.get(clusterService.getSettings())
+        );
+        clusterService.getClusterSettings()
+            .addSettingsUpdateConsumer(
+                org.opensearch.analytics.settings.AnalyticsQuerySettings.TRACK_TOTAL_HITS_ENABLED,
+                trackTotalHits::set
+            );
+        searchService.setEmitFragmentMetrics(trackTotalHits::get);
         DefaultEngineContextProvider ctx = new DefaultEngineContextProvider(clusterService, indexNameExpressionResolver, backEndsByName);
         // Build the coordinator allocator under POOL_QUERY here, in the plugin, so that the
         // plugin's lifecycle owns its lifetime. The Guice-bound DefaultPlanExecutor consumes

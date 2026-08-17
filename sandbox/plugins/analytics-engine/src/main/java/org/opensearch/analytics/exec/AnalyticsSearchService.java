@@ -52,6 +52,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executor;
+import java.util.function.BooleanSupplier;
 
 /**
  * Data-node service that executes plan fragments against local shards.
@@ -81,6 +82,9 @@ public class AnalyticsSearchService implements AutoCloseable {
     /** Cross-phase reader cache for QTF — query phase stores, fetch phase acquires. */
     private final ReaderContextStore readerContextStore;
     private TaskResourceTrackingService taskResourceTrackingService;
+
+    /** Live gate for attaching execution metrics to every fragment stream (default off). */
+    private volatile BooleanSupplier emitFragmentMetrics = () -> false;
     private final BufferAllocator allocator;
     private final ArrowNativeAllocator nativeAllocator;
 
@@ -127,6 +131,16 @@ public class AnalyticsSearchService implements AutoCloseable {
 
     public void setTaskResourceTrackingService(TaskResourceTrackingService service) {
         this.taskResourceTrackingService = service;
+    }
+
+    /**
+     * Supplies the live {@code analytics.query.track_total_hits.enabled} value. When true,
+     * fragment execution metrics are attached to every fragment stream (see
+     * {@code executeFragmentStreaming}); the coordinator consumes {@code rows_matched} from
+     * them for {@code hits.total}. Wired by the plugin from cluster settings.
+     */
+    public void setEmitFragmentMetrics(BooleanSupplier emitFragmentMetrics) {
+        this.emitFragmentMetrics = emitFragmentMetrics;
     }
 
     /**
@@ -243,8 +257,11 @@ public class AnalyticsSearchService implements AutoCloseable {
                         responseHandler.onBatch(batch);
                     }
                     long fragmentTookNanos = System.nanoTime() - startNanos;
-                    // Extract DataFusion execution metrics only when needed
-                    if (request.profile() || LOGGER.isDebugEnabled()) {
+                    // Extract DataFusion execution metrics only when needed. Track-total-hits
+                    // needs them on every fragment (rows_matched feeds hits.total), not just
+                    // profiled ones.
+                    boolean emitMetrics = request.profile() || emitFragmentMetrics.getAsBoolean();
+                    if (emitMetrics || LOGGER.isDebugEnabled()) {
                         byte[] metricsJson = exec.resources().getExecutionMetrics();
                         if (LOGGER.isDebugEnabled() && metricsJson != null) {
                             LOGGER.debug(
@@ -253,7 +270,7 @@ public class AnalyticsSearchService implements AutoCloseable {
                                 new String(metricsJson, StandardCharsets.UTF_8)
                             );
                         }
-                        if (request.profile() && metricsJson != null) {
+                        if (emitMetrics && metricsJson != null) {
                             responseHandler.onCompleteWithMetrics(metricsJson);
                         } else {
                             responseHandler.onComplete();

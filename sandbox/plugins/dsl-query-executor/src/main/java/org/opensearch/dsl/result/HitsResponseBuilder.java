@@ -10,6 +10,7 @@ package org.opensearch.dsl.result;
 
 import org.apache.lucene.search.TotalHits;
 import org.opensearch.action.search.SearchRequest;
+import org.opensearch.analytics.exec.ExecutionTotals;
 import org.opensearch.common.xcontent.json.JsonXContent;
 import org.opensearch.core.common.bytes.BytesReference;
 import org.opensearch.core.xcontent.XContentBuilder;
@@ -95,9 +96,25 @@ public final class HitsResponseBuilder {
             hits[i] = buildHit(i, fieldNames, rows.get(i));
         }
 
+        // Prefer engine-computed totals when available (analytics.query.track_total_hits.enabled).
+        // M1 scope: sorted requests only — their fragments evaluate every row group (TopK), so
+        // rows_matched is complete. Unsorted fragments can stop early at the limit and undercount.
+        if (isSorted(request) && hitsResult.getRows() instanceof ExecutionTotals.Holder holder) {
+            ExecutionTotals totals = holder.executionTotals();
+            if (totals != null && totals.value() >= rows.size()) {
+                TotalHits.Relation relation = totals.exact() ? TotalHits.Relation.EQUAL_TO : TotalHits.Relation.GREATER_THAN_OR_EQUAL_TO;
+                return new SearchHits(hits, new TotalHits(totals.value(), relation), Float.NaN);
+            }
+        }
+
         // eq/gte semantics: see class javadoc.
         TotalHits.Relation relation = rows.size() < size ? TotalHits.Relation.EQUAL_TO : TotalHits.Relation.GREATER_THAN_OR_EQUAL_TO;
         return new SearchHits(hits, new TotalHits(rows.size(), relation), Float.NaN);
+    }
+
+    private static boolean isSorted(SearchRequest request) {
+        SearchSourceBuilder source = request.source();
+        return source != null && source.sorts() != null && !source.sorts().isEmpty();
     }
 
     private static int resolveSize(SearchRequest request) {
