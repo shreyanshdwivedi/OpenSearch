@@ -40,6 +40,7 @@ import org.opensearch.dsl.aggregation.AggregationTreeWalker;
 import org.opensearch.dsl.executor.QueryPlans;
 import org.opensearch.dsl.query.QueryRegistry;
 import org.opensearch.dsl.query.QueryRegistryFactory;
+import org.opensearch.index.mapper.MapperService;
 import org.opensearch.search.SearchService;
 import org.opensearch.search.builder.SearchSourceBuilder;
 import org.opensearch.search.internal.SearchContext;
@@ -50,6 +51,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.function.Supplier;
 
 /**
  * Converts {@link SearchSourceBuilder} DSL into Calcite {@link QueryPlans}.
@@ -61,7 +63,6 @@ public class SearchSourceConverter {
 
     /** Immutable after creation with stateless translators — shared across all requests. */
     private static final QueryRegistry QUERY_REGISTRY = QueryRegistryFactory.create();
-    private static final AggregationRegistry AGG_REGISTRY = AggregationRegistryFactory.create();
 
     private final RelDataTypeFactory typeFactory;
     private final CalciteCatalogReader catalogReader;
@@ -71,14 +72,27 @@ public class SearchSourceConverter {
     private final AggregateConverter aggConverter;
     private final PreAggregateConverter preAggConverter;
     private final PostAggregateConverter postAggConverter;
+    private final AggregationRegistry aggRegistry;
     private final AggregationTreeWalker treeWalker;
+
+    /**
+     * Initializes planning infrastructure without mapping resolution — response key typing
+     * falls back to value sampling. Intended for tests.
+     *
+     * @param schema Calcite schema with index tables from the analytics engine
+     */
+    public SearchSourceConverter(SchemaPlus schema) {
+        this(schema, () -> null);
+    }
 
     /**
      * Initializes planning infrastructure from the given schema.
      *
      * @param schema Calcite schema with index tables from the analytics engine
+     * @param mapperServiceSupplier supplies the target index's MapperService for response key
+     *        type and format resolution; evaluated lazily, may supply null
      */
-    public SearchSourceConverter(SchemaPlus schema) {
+    public SearchSourceConverter(SchemaPlus schema, Supplier<MapperService> mapperServiceSupplier) {
         // TODO: Once Analytics plugin starts providing the RelOptTable, use it directly —
         // no need to reconstruct typeFactory, CatalogReader, and planning infrastructure here.
         this.typeFactory = new SqlTypeFactoryImpl(RelDataTypeSystem.DEFAULT);
@@ -98,12 +112,13 @@ public class SearchSourceConverter {
         this.preAggConverter = new PreAggregateConverter();
         this.postAggConverter = new PostAggregateConverter();
 
-        this.treeWalker = new AggregationTreeWalker(AGG_REGISTRY);
+        this.aggRegistry = AggregationRegistryFactory.create(mapperServiceSupplier);
+        this.treeWalker = new AggregationTreeWalker(aggRegistry);
     }
 
     /** Returns the aggregation registry used by this converter. */
     public AggregationRegistry getAggregationRegistry() {
-        return AGG_REGISTRY;
+        return aggRegistry;
     }
 
     /**
