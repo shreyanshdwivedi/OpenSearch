@@ -19,6 +19,7 @@ import org.opensearch.search.SearchHit;
 import org.opensearch.search.SearchHits;
 import org.opensearch.search.SearchService;
 import org.opensearch.search.builder.SearchSourceBuilder;
+import org.opensearch.search.internal.SearchContext;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -71,12 +72,18 @@ public final class HitsResponseBuilder {
             }
         }
 
+        Integer trackUpTo = trackTotalHitsUpTo(request);
+        boolean trackingDisabled = trackUpTo != null && trackUpTo == SearchContext.TRACK_TOTAL_HITS_DISABLED;
+
         if (hitsResult == null) {
             // size=0 request: no hits were fetched. The COUNT plan supplies the exact match
             // count like legacy; without one (results not produced by the converter, e.g. in
             // tests) fall back to the honest lower bound.
+            if (trackingDisabled) {
+                return new SearchHits(new SearchHit[0], null, Float.NaN);
+            }
             TotalHits total = countResult != null
-                ? new TotalHits(extractCount(countResult), TotalHits.Relation.EQUAL_TO)
+                ? cappedTotal(extractCount(countResult), trackUpTo)
                 : new TotalHits(0, TotalHits.Relation.GREATER_THAN_OR_EQUAL_TO);
             return new SearchHits(new SearchHit[0], total, Float.NaN);
         }
@@ -95,9 +102,41 @@ public final class HitsResponseBuilder {
             hits[i] = buildHit(i, fieldNames, rows.get(i));
         }
 
+        // Totals precedence for size>0:
+        // 1. tracking disabled -> no total at all (vanilla track_total_hits: false)
+        // 2. COUNT plan result (explicit track_total_hits) -> exact, capped to the threshold
+        // 3. page inference (short page exact / full page lower bound)
+        if (trackingDisabled) {
+            return new SearchHits(hits, null, Float.NaN);
+        }
+
+        if (countResult != null) {
+            return new SearchHits(hits, cappedTotal(extractCount(countResult), trackUpTo), Float.NaN);
+        }
+
         // eq/gte semantics: see class javadoc.
         TotalHits.Relation relation = rows.size() < size ? TotalHits.Relation.EQUAL_TO : TotalHits.Relation.GREATER_THAN_OR_EQUAL_TO;
         return new SearchHits(hits, new TotalHits(rows.size(), relation), Float.NaN);
+    }
+
+    /** The request's track_total_hits threshold: null when unset, -1 disabled, else the cap. */
+    private static Integer trackTotalHitsUpTo(SearchRequest request) {
+        SearchSourceBuilder source = request.source();
+        return source == null ? null : source.trackTotalHitsUpTo();
+    }
+
+    /**
+     * Applies the track_total_hits cap post-hoc, mirroring vanilla's rendering: an exact count
+     * under the threshold is {@code eq}; at or above it, the value is clamped and reported as
+     * {@code gte}. Cap pushdown into the COUNT plan itself is deferred — a partially-consumed
+     * limited stream currently trips the collector-release crash on the engine side.
+     */
+    private static TotalHits cappedTotal(long count, Integer trackUpTo) {
+        long threshold = trackUpTo == null ? SearchContext.TRACK_TOTAL_HITS_ACCURATE : trackUpTo.longValue();
+        if (count >= threshold && threshold != SearchContext.TRACK_TOTAL_HITS_ACCURATE) {
+            return new TotalHits(threshold, TotalHits.Relation.GREATER_THAN_OR_EQUAL_TO);
+        }
+        return new TotalHits(count, TotalHits.Relation.EQUAL_TO);
     }
 
     private static int resolveSize(SearchRequest request) {

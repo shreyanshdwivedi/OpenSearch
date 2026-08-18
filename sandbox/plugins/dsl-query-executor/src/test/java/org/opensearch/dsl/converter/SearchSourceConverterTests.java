@@ -121,6 +121,33 @@ public class SearchSourceConverterTests extends OpenSearchTestCase {
         assertFalse(plans.has(QueryPlans.Type.AGGREGATION));
     }
 
+    /** size>0 with explicit track_total_hits adds the reusable COUNT plan alongside HITS. */
+    public void testExplicitTrackingAddsCountPlanForHitsQueries() throws ConversionException {
+        SearchSourceBuilder source = new SearchSourceBuilder().size(10).trackTotalHits(true);
+        QueryPlans plans = converter.convert(source, "test-index");
+
+        assertEquals(2, plans.getAll().size());
+        assertTrue(plans.has(QueryPlans.Type.HITS));
+        assertTrue(plans.has(QueryPlans.Type.COUNT));
+    }
+
+    /** track_total_hits: false suppresses the COUNT plan even for size=0. */
+    public void testTrackingDisabledSuppressesCountPlan() throws ConversionException {
+        SearchSourceBuilder sizeZero = new SearchSourceBuilder().size(0).trackTotalHits(false);
+        assertEquals(0, converter.convert(sizeZero, "test-index").getAll().size());
+
+        SearchSourceBuilder hits = new SearchSourceBuilder().size(10).trackTotalHits(false);
+        QueryPlans plans = converter.convert(hits, "test-index");
+        assertEquals(1, plans.getAll().size());
+        assertFalse(plans.has(QueryPlans.Type.COUNT));
+    }
+
+    /** Without explicit tracking, size>0 emits no COUNT plan (no extra query by default). */
+    public void testNoTrackingNoCountPlanForHitsQueries() throws ConversionException {
+        QueryPlans plans = converter.convert(new SearchSourceBuilder().size(10), "test-index");
+        assertFalse(plans.has(QueryPlans.Type.COUNT));
+    }
+
     /** size=0 is a count query: legacy still reports the exact match count in hits.total. */
     public void testSizeZeroProducesCountPlan() throws ConversionException {
         SearchSourceBuilder source = new SearchSourceBuilder().size(0);

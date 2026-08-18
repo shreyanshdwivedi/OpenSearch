@@ -36,6 +36,7 @@ import org.opensearch.dsl.query.QueryRegistry;
 import org.opensearch.dsl.query.QueryRegistryFactory;
 import org.opensearch.search.SearchService;
 import org.opensearch.search.builder.SearchSourceBuilder;
+import org.opensearch.search.internal.SearchContext;
 
 import java.util.Collections;
 import java.util.List;
@@ -122,6 +123,9 @@ public class SearchSourceConverter {
 
         int size = searchSource.size() != -1 ? searchSource.size() : SearchService.DEFAULT_SIZE;
         boolean hasAggs = hasAggregations(searchSource);
+        Integer trackTotalHitsUpTo = searchSource.trackTotalHitsUpTo();
+        boolean trackingDisabled = trackTotalHitsUpTo != null && trackTotalHitsUpTo == SearchContext.TRACK_TOTAL_HITS_DISABLED;
+        boolean trackingRequested = trackTotalHitsUpTo != null && !trackingDisabled;
 
         QueryPlans.Builder builder = new QueryPlans.Builder();
 
@@ -130,7 +134,14 @@ public class SearchSourceConverter {
             RelNode hits = projectConverter.convert(base, ctx);
             hits = sortConverter.convert(hits, ctx);
             builder.add(new QueryPlans.QueryPlan(QueryPlans.Type.HITS, hits));
-        } else {
+            // Explicit track_total_hits: the request wants a real match count, so run the
+            // reusable COUNT plan alongside the hits plan — the same cost model as vanilla,
+            // where explicit tracking pays for counting. The cap is applied post-hoc by the
+            // response builder.
+            if (trackingRequested) {
+                builder.add(new QueryPlans.QueryPlan(QueryPlans.Type.COUNT, buildCountPlan(base)));
+            }
+        } else if (!trackingDisabled) {
             // size=0 skips hits, but legacy still reports the exact match count in hits.total
             // (size=0 requests are count queries). Emit a COUNT(*) plan in the hits slot; the
             // response builder consumes it for total {n, eq}.

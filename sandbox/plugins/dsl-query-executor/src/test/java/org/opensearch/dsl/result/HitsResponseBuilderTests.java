@@ -192,6 +192,54 @@ public class HitsResponseBuilderTests extends OpenSearchTestCase {
         assertEquals(Map.of("name", "laptop"), hits.getHits()[0].getSourceAsMap());
     }
 
+    /** Explicit tracking: the COUNT result supplies totals for size>0 (any sort). */
+    public void testCountResultUsedForHitsQueries() throws Exception {
+        ExecutionResult hitsResult = new ExecutionResult(
+            hitsPlan(PRODUCTS_MAPPING),
+            List.<Object[]>of(new Object[] { "laptop", 999, "BrandA" })
+        );
+        ExecutionResult countResult = new ExecutionResult(countPlan(), List.<Object[]>of(new Object[] { 4200L }));
+
+        SearchRequest request = new SearchRequest("products");
+        request.source(new SearchSourceBuilder().size(10).trackTotalHits(true));
+
+        SearchHits hits = HitsResponseBuilder.build(List.of(hitsResult, countResult), request);
+
+        assertEquals(1, hits.getHits().length);
+        assertEquals(4200L, hits.getTotalHits().value());
+        assertEquals(TotalHits.Relation.EQUAL_TO, hits.getTotalHits().relation());
+    }
+
+    /** A numeric track_total_hits caps the reported total, mirroring vanilla's threshold. */
+    public void testCountCappedAtTrackTotalHitsThreshold() throws Exception {
+        ExecutionResult countResult = new ExecutionResult(countPlan(), List.<Object[]>of(new Object[] { 4200L }));
+
+        SearchRequest request = new SearchRequest("products");
+        SearchSourceBuilder source = new SearchSourceBuilder().size(0);
+        source.trackTotalHitsUpTo(1000);
+        request.source(source);
+
+        SearchHits hits = HitsResponseBuilder.build(List.of(countResult), request);
+
+        assertEquals(1000L, hits.getTotalHits().value());
+        assertEquals(TotalHits.Relation.GREATER_THAN_OR_EQUAL_TO, hits.getTotalHits().relation());
+    }
+
+    /** track_total_hits: false omits the total entirely, like vanilla. */
+    public void testTrackingDisabledOmitsTotal() throws Exception {
+        ExecutionResult hitsResult = new ExecutionResult(
+            hitsPlan(PRODUCTS_MAPPING),
+            List.<Object[]>of(new Object[] { "laptop", 999, "BrandA" })
+        );
+        SearchRequest request = new SearchRequest("products");
+        request.source(new SearchSourceBuilder().size(10).trackTotalHits(false));
+
+        SearchHits hits = HitsResponseBuilder.build(List.of(hitsResult), request);
+
+        assertEquals(1, hits.getHits().length);
+        assertNull(hits.getTotalHits());
+    }
+
     public void testRowCellCountMismatchThrows() {
         ExecutionResult result = new ExecutionResult(hitsPlan(PRODUCTS_MAPPING), List.<Object[]>of(new Object[] { "laptop", 999 }));
 
