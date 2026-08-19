@@ -26,6 +26,7 @@ import org.opensearch.common.settings.Settings;
 import org.opensearch.common.util.concurrent.ThreadContext;
 import org.opensearch.core.common.Strings;
 import org.opensearch.index.IndexNotFoundException;
+import org.opensearch.index.mapper.IdFieldMapper;
 
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -46,6 +47,11 @@ public class OpenSearchSchemaBuilder {
         return buildSchema(clusterState, new IndexNameExpressionResolver(new ThreadContext(Settings.EMPTY)));
     }
 
+    /** Like {@link #buildSchema(ClusterState)}, with metadata columns opt-in (see the boolean overload). */
+    public static SchemaPlus buildSchema(ClusterState clusterState, boolean includeMetadataColumns) {
+        return buildSchema(clusterState, new IndexNameExpressionResolver(new ThreadContext(Settings.EMPTY)), includeMetadataColumns);
+    }
+
     /**
      * Builds a Calcite SchemaPlus from the given ClusterState.
      *
@@ -62,6 +68,21 @@ public class OpenSearchSchemaBuilder {
      * that drives lazy resolution of expressions.
      */
     public static SchemaPlus buildSchema(ClusterState clusterState, IndexNameExpressionResolver resolver) {
+        return buildSchema(clusterState, resolver, false);
+    }
+
+    /**
+     * Like {@link #buildSchema(ClusterState, IndexNameExpressionResolver)}, additionally exposing
+     * stored metadata columns when {@code includeMetadataColumns} is true. Currently that is
+     * {@code _id} (VARBINARY, the Uid-encoded id bytes the parquet primary stores per document),
+     * appended after the mapped fields so mapped-field ordinals are unchanged.
+     *
+     * <p>Opt-in because this schema is shared by every front-end: a star expansion
+     * ({@code source=idx} in PPL, {@code SELECT *}) enumerates the row type, and front-ends that
+     * render mapped fields only must not suddenly see metadata columns. Front-ends that lift
+     * metadata out of the row (the DSL hits path) request it explicitly.
+     */
+    public static SchemaPlus buildSchema(ClusterState clusterState, IndexNameExpressionResolver resolver, boolean includeMetadataColumns) {
         Schema lazySchema = new AbstractSchema() {
             // Truly lazy table map, mirroring sql-plugin's OpenSearchSchema pattern: no upfront
             // enumeration of cluster indices. get() registers on first lookup and caches under the
@@ -75,7 +96,7 @@ public class OpenSearchSchemaBuilder {
                 public Table get(Object key) {
                     String name = ((String) key).toLowerCase(java.util.Locale.ROOT);
                     if (!super.containsKey(name)) {
-                        Table resolved = resolveTable(clusterState, resolver, name);
+                        Table resolved = resolveTable(clusterState, resolver, name, includeMetadataColumns);
                         if (resolved != null) {
                             super.put(name, resolved);
                         }
@@ -103,7 +124,12 @@ public class OpenSearchSchemaBuilder {
      * is referenced.
      */
     @SuppressWarnings("unchecked")
-    private static Table resolveTable(ClusterState clusterState, IndexNameExpressionResolver resolver, String expression) {
+    private static Table resolveTable(
+        ClusterState clusterState,
+        IndexNameExpressionResolver resolver,
+        String expression,
+        boolean includeMetadataColumns
+    ) {
         // Short-circuit literal alias / data stream names so the resolver's lenientExpandOpen
         // (which does not include hidden backings) doesn't filter out data stream backings. The
         // alias / data-stream abstraction already carries the full backing list — use it directly.
@@ -155,7 +181,7 @@ public class OpenSearchSchemaBuilder {
         if (merged.isEmpty()) {
             return null;
         }
-        return buildTable(merged);
+        return buildTable(merged, includeMetadataColumns);
     }
 
     /**
@@ -292,12 +318,21 @@ public class OpenSearchSchemaBuilder {
         return typeFactory.createTypeWithNullability(base, true);
     }
 
-    private static AbstractTable buildTable(Map<String, Object> properties) {
+    private static AbstractTable buildTable(Map<String, Object> properties, boolean includeMetadataColumns) {
         return new AbstractTable() {
             @Override
             public RelDataType getRowType(RelDataTypeFactory typeFactory) {
                 RelDataTypeFactory.Builder builder = typeFactory.builder();
                 addLeafFields(builder, typeFactory, properties, "");
+                if (includeMetadataColumns) {
+                    // _id: Uid-encoded bytes, stored not-null by the parquet primary
+                    // (IdParquetField -> Arrow Binary). Appended last so mapped-field ordinals
+                    // are identical with and without metadata columns.
+                    builder.add(
+                        IdFieldMapper.NAME,
+                        typeFactory.createTypeWithNullability(typeFactory.createSqlType(SqlTypeName.VARBINARY), false)
+                    );
+                }
                 return builder.build();
             }
         };

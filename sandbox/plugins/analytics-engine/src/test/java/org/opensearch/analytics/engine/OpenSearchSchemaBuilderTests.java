@@ -58,6 +58,33 @@ public class OpenSearchSchemaBuilderTests extends OpenSearchTestCase {
         assertFieldType(rowType, "score", SqlTypeName.DOUBLE);
     }
 
+    /** Metadata columns are opt-in: the default schema never exposes _id. */
+    public void testMetadataColumnsAbsentByDefault() throws Exception {
+        ClusterState clusterState = buildClusterState(Map.of("test_index", Map.of("name", "keyword")));
+
+        SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(clusterState);
+
+        RelDataType rowType = schema.getTable("test_index").getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        assertEquals(1, rowType.getFieldCount());
+        assertNull(rowType.getField("_id", false, false));
+    }
+
+    /** With metadata columns requested, _id (VARBINARY NOT NULL) is appended after mapped fields. */
+    public void testMetadataColumnsExposeIdLast() throws Exception {
+        ClusterState clusterState = buildClusterState(Map.of("test_index", Map.of("name", "keyword", "age", "long")));
+
+        SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(clusterState, true);
+
+        RelDataType rowType = schema.getTable("test_index").getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        assertEquals(3, rowType.getFieldCount());
+        RelDataTypeField id = rowType.getField("_id", false, false);
+        assertNotNull(id);
+        assertEquals(SqlTypeName.VARBINARY, id.getType().getSqlTypeName());
+        assertFalse(id.getType().isNullable());
+        // appended last: mapped-field ordinals identical with and without metadata columns
+        assertEquals(rowType.getFieldCount() - 1, id.getIndex());
+    }
+
     /**
      * Test integer, float, boolean type mappings.
      */

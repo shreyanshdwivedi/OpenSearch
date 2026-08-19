@@ -113,7 +113,9 @@ public class TransportDslExecuteAction extends HandledTransportAction<SearchRequ
                     }
                 };
 
-                converter = new SearchSourceConverter(contextProvider.getContext().schema(), mapperServiceSupplier);
+                // Metadata columns on: the hits path lifts _id out of result rows into the
+                // hit envelope. Other front-ends keep the mapped-fields-only schema.
+                converter = new SearchSourceConverter(contextProvider.getContext(true).schema(), mapperServiceSupplier);
 
                 plans = converter.convert(request.source(), indexName);
             } catch (ConversionException e) {

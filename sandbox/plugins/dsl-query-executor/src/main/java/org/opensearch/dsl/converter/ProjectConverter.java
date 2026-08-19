@@ -14,6 +14,7 @@ import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeField;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexNode;
+import org.opensearch.index.mapper.IdFieldMapper;
 import org.opensearch.search.fetch.subphase.FetchSourceContext;
 
 import java.util.ArrayList;
@@ -25,6 +26,11 @@ import java.util.regex.Pattern;
 /**
  * Converts {@code _source} field selection to a {@link LogicalProject}.
  * Handles exact field names, wildcard patterns, and {@code _source: false}.
+ *
+ * <p>The {@code _id} metadata column (present when the schema was built with metadata columns)
+ * is not part of {@code _source} and always survives source filtering — including
+ * {@code _source: false}, which in classic search suppresses the source but not the hit ids.
+ * The response builder lifts it out of the row into the hit envelope.
  */
 public class ProjectConverter extends AbstractDslConverter {
 
@@ -41,7 +47,8 @@ public class ProjectConverter extends AbstractDslConverter {
         FetchSourceContext fetchSource = ctx.getSearchSource().fetchSource();
 
         if (!fetchSource.fetchSource()) {
-            return LogicalProject.create(input, List.of(), List.of(), List.of());
+            // _source: false still returns hits with ids; keep only the metadata column if present.
+            return LogicalProject.create(input, List.of(), metadataProjects(input, ctx.getRexBuilder()), metadataNames(input));
         }
 
         String[] includes = fetchSource.includes();
@@ -54,6 +61,17 @@ public class ProjectConverter extends AbstractDslConverter {
         }
 
         return createProjection(input, includes, excludes, ctx.getRexBuilder());
+    }
+
+    /** Input refs for the metadata columns present on the row (currently at most {@code _id}). */
+    private static List<RexNode> metadataProjects(RelNode input, RexBuilder rexBuilder) {
+        RelDataTypeField id = input.getRowType().getField(IdFieldMapper.NAME, false, false);
+        return id == null ? List.of() : List.of(rexBuilder.makeInputRef(id.getType(), id.getIndex()));
+    }
+
+    /** Names matching {@link #metadataProjects}. */
+    private static List<String> metadataNames(RelNode input) {
+        return input.getRowType().getField(IdFieldMapper.NAME, false, false) == null ? List.of() : List.of(IdFieldMapper.NAME);
     }
 
     private RelNode createProjection(RelNode input, String[] includes, String[] excludes, RexBuilder rexBuilder)
@@ -84,6 +102,14 @@ public class ProjectConverter extends AbstractDslConverter {
                     fieldNames.add(field.getName());
                 }
             }
+        }
+
+        // _id is metadata, not source: it survives source filtering (the response builder
+        // lifts it out of the row; it never lands in _source).
+        RelDataTypeField id = rowType.getField(IdFieldMapper.NAME, false, false);
+        if (id != null && !seen.contains(IdFieldMapper.NAME) && !fieldNames.contains(IdFieldMapper.NAME)) {
+            projects.add(rexBuilder.makeInputRef(id.getType(), id.getIndex()));
+            fieldNames.add(IdFieldMapper.NAME);
         }
 
         return LogicalProject.create(input, List.of(), projects, fieldNames);

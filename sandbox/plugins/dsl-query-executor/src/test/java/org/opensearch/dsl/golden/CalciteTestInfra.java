@@ -104,6 +104,8 @@ public class CalciteTestInfra {
                 return SqlTypeName.DATE;
             case "TIMESTAMP":
                 return SqlTypeName.TIMESTAMP;
+            case "VARBINARY":
+                return SqlTypeName.VARBINARY;
             default:
                 throw new IllegalArgumentException("Unsupported SQL type in golden file indexMapping: " + goldenType);
         }

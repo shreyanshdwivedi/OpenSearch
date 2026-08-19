@@ -42,7 +42,26 @@ public interface EngineContextProvider {
         return new QueryRequestContext(clusterState, OpenSearchSchemaBuilder.buildSchema(clusterState));
     }
 
+    /**
+     * Like {@link #getContext(ClusterState)}, additionally exposing stored metadata columns
+     * ({@code _id}) in the schema when {@code includeMetadataColumns} is true. Front-ends that
+     * lift metadata out of result rows (the DSL hits path) request this; the plain overloads
+     * keep the mapped-fields-only schema so star expansion is unchanged for everyone else.
+     */
+    default QueryRequestContext getContext(ClusterState clusterState, boolean includeMetadataColumns) {
+        return new QueryRequestContext(clusterState, OpenSearchSchemaBuilder.buildSchema(clusterState, includeMetadataColumns));
+    }
+
     QueryRequestContext getContext();
+
+    /**
+     * Like {@link #getContext()}, with metadata columns opt-in. Default falls back to the
+     * mapped-fields-only context so existing implementations (including test fakes) are
+     * unaffected; the engine's implementation overrides this to honor the flag.
+     */
+    default QueryRequestContext getContext(boolean includeMetadataColumns) {
+        return getContext();
+    }
 
     /**
      * Converts a backend-specific exception into an appropriate OpenSearch exception type.

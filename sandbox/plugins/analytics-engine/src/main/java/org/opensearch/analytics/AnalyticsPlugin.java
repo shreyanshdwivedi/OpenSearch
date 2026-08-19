@@ -315,6 +315,17 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
         }
 
         @Override
+        public QueryRequestContext getContext(ClusterState clusterState, boolean includeMetadataColumns) {
+            SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(clusterState, indexNameExpressionResolver, includeMetadataColumns);
+            return new QueryRequestContext(clusterState, schema);
+        }
+
+        @Override
+        public QueryRequestContext getContext(boolean includeMetadataColumns) {
+            return getContext(clusterService.state(), includeMetadataColumns);
+        }
+
+        @Override
         public QueryRequestContext getContext() {
             return getContext(clusterService.state());
         }

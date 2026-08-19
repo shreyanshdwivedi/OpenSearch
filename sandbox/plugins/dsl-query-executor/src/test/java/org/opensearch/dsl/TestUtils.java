@@ -47,13 +47,19 @@ public class TestUtils {
 
     /** Creates a LogicalTableScan backed by the standard test schema. */
     public static LogicalTableScan createTestRelNode() {
-        Infra infra = buildInfra();
+        Infra infra = buildInfra(false);
+        return LogicalTableScan.create(infra.cluster, infra.table, List.of());
+    }
+
+    /** Like {@link #createTestRelNode()}, with the {@code _id} metadata column appended. */
+    public static LogicalTableScan createTestRelNodeWithId() {
+        Infra infra = buildInfra(true);
         return LogicalTableScan.create(infra.cluster, infra.table, List.of());
     }
 
     /** Creates a ConversionContext with the given search source and standard test schema. */
     public static ConversionContext createContext(SearchSourceBuilder searchSource) {
-        Infra infra = buildInfra();
+        Infra infra = buildInfra(false);
         return new ConversionContext(searchSource, infra.cluster, infra.table);
     }
 
@@ -62,7 +68,7 @@ public class TestUtils {
         return createContext(new SearchSourceBuilder());
     }
 
-    private static Infra buildInfra() {
+    private static Infra buildInfra(boolean includeIdColumn) {
         RelDataTypeFactory typeFactory = new SqlTypeFactoryImpl(RelDataTypeSystem.DEFAULT);
         HepPlanner planner = new HepPlanner(HepProgram.builder().build());
         RelOptCluster cluster = RelOptCluster.create(planner, new RexBuilder(typeFactory));
@@ -72,7 +78,7 @@ public class TestUtils {
             @Override
             public RelDataType getRowType(RelDataTypeFactory tf) {
                 // Nullable fields — matches OpenSearchSchemaBuilder behavior
-                return tf.builder()
+                RelDataTypeFactory.Builder builder = tf.builder()
                     .add("name", tf.createTypeWithNullability(tf.createSqlType(SqlTypeName.VARCHAR), true))
                     .add("price", tf.createTypeWithNullability(tf.createSqlType(SqlTypeName.INTEGER), true))
                     .add("brand", tf.createTypeWithNullability(tf.createSqlType(SqlTypeName.VARCHAR), true))
@@ -82,8 +88,12 @@ public class TestUtils {
                     .add("timestamp", tf.createTypeWithNullability(tf.createSqlType(SqlTypeName.BIGINT), true))
                     .add("location", tf.createTypeWithNullability(tf.createSqlType(SqlTypeName.GEOMETRY), true))
                     .add("status", tf.createTypeWithNullability(tf.createSqlType(SqlTypeName.VARCHAR), true))
-                    .add("binary_data", tf.createTypeWithNullability(tf.createSqlType(SqlTypeName.VARBINARY), true))
-                    .build();
+                    .add("binary_data", tf.createTypeWithNullability(tf.createSqlType(SqlTypeName.VARBINARY), true));
+                if (includeIdColumn) {
+                    // matches OpenSearchSchemaBuilder's metadata column: appended last, not null
+                    builder.add("_id", tf.createTypeWithNullability(tf.createSqlType(SqlTypeName.VARBINARY), false));
+                }
+                return builder.build();
             }
         });
 
