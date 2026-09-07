@@ -26,7 +26,7 @@ import org.opensearch.common.settings.Settings;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.store.RemoteSegmentStoreDirectory;
 import org.opensearch.index.store.RemoteSegmentStoreDirectoryFactory;
-import org.opensearch.index.store.UploadedSegmentMetadata;
+import org.opensearch.index.store.RemoteSegmentStoreDirectory.UploadedSegmentMetadata;
 import org.opensearch.index.store.remote.metadata.RemoteSegmentMetadata;
 import org.opensearch.plugin.iceberg.catalog.S3TablesIcebergManager;
 import org.opensearch.repositories.RepositoriesService;
@@ -427,7 +427,7 @@ public class IcebergService {
                     // Check if it's a parquet file
                     if (fileNameKey.contains("parquet")) {
                         // Construct full S3 URI from repository config + metadata
-                        String s3Path = String.format("s3://%s/%s/%s/%d/segments/data/parquet/%s",
+                        String s3Path = String.format("s3://%s/%s/%s/%d/segments/parquet/%s",
                             finalBucket,
                             finalBase,
                             indexUUID,
