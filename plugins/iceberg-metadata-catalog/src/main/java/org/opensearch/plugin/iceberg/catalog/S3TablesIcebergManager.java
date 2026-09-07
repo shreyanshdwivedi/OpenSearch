@@ -40,10 +40,6 @@ public class S3TablesIcebergManager {
     // Configuration from Settings
     private final String bucketArn;
     private final String region;
-    private final String credentialsFilePath;
-    
-    // Credentials loaded from file
-    private final Map<String, String> fileCredentials;
 
     public S3TablesIcebergManager(org.opensearch.common.settings.Settings settings) {
         System.out.println("[Iceberg S3Tables] ===== CONSTRUCTOR CALLED =====");
@@ -60,16 +56,9 @@ public class S3TablesIcebergManager {
         // Read from Settings (no defaults - must be configured)
         this.bucketArn = settings.get("iceberg.s3tables.bucket.arn");
         this.region = settings.get("iceberg.aws.region");
-        this.credentialsFilePath = settings.get("iceberg.credentials.file", "/home/ec2-user/creds-iceberg/credentials.txt");
-        
         if (this.bucketArn == null || this.region == null) {
             throw new IllegalArgumentException("Missing required settings: iceberg.s3tables.bucket.arn and iceberg.aws.region");
         }
-
-        // Load credentials from file
-        this.fileCredentials = loadCredentialsFromFile(this.credentialsFilePath);
-        logger.info("[Iceberg S3Tables] Loaded {} credentials from file: {}", 
-                   fileCredentials.size(), credentialsFilePath);
 
         String s3TablesBucketArn = this.bucketArn;
 
@@ -397,97 +386,4 @@ public class S3TablesIcebergManager {
         }
     }
 
-    /**
-     * Get credentials loaded from file.
-     * @return Map with keys: access_key, secret_key, session_token (if available)
-     */
-    public Map<String, String> getFileCredentials() {
-        return new HashMap<>(fileCredentials);
-    }
-
-    /**
-     * Load credentials from file.
-     * Expected format:
-     * aws_access_key_id=[access key]
-     * aws_secret_access_key=[secret access key]
-     * aws_session_token=[session token]
-     *
-     * @param filePath Path to credentials file
-     * @return Map with keys: access_key, secret_key, session_token
-     * @throws RuntimeException if file not found or required credentials missing
-     */
-    private static Map<String, String> loadCredentialsFromFile(String filePath) {
-        Map<String, String> credentials = new HashMap<>();
-        
-        if (!Files.exists(Paths.get(filePath))) {
-            String errorMsg = String.format("[Iceberg S3Tables] Credentials file not found: %s", filePath);
-            logger.error(errorMsg);
-            throw new RuntimeException(errorMsg);
-        }
-
-        try (BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                line = line.trim();
-                if (line.isEmpty() || line.startsWith("#")) {
-                    continue; // Skip empty lines and comments
-                }
-                
-                String[] parts = line.split("=", 2);
-                if (parts.length == 2) {
-                    String key = parts[0].trim();
-                    String value = parts[1].trim();
-                    
-                    switch (key) {
-                        case "aws_access_key_id":
-                            credentials.put("access_key", value);
-                            logger.info("[Iceberg S3Tables] Loaded access key from file");
-                            break;
-                        case "aws_secret_access_key":
-                            credentials.put("secret_key", value);
-                            logger.info("[Iceberg S3Tables] Loaded secret key from file");
-                            break;
-                        case "aws_session_token":
-                            credentials.put("session_token", value);
-                            logger.info("[Iceberg S3Tables] Loaded session token from file");
-                            break;
-                        default:
-                            logger.debug("[Iceberg S3Tables] Ignoring unknown credential key: {}", key);
-                    }
-                }
-            }
-            
-            // Validate required credentials are present
-            if (!credentials.containsKey("access_key") || !credentials.containsKey("secret_key")) {
-                String errorMsg = String.format(
-                    "[Iceberg S3Tables] Missing required credentials in file: %s. " +
-                    "File must contain aws_access_key_id and aws_secret_access_key",
-                    filePath
-                );
-                logger.error(errorMsg);
-                throw new RuntimeException(errorMsg);
-            }
-            
-            // DEBUG: Print full credential values to check for hidden characters
-            logger.info("[DEBUG ICEBERG CREDS] Access Key: '{}'", credentials.get("access_key"));
-            logger.info("[DEBUG ICEBERG CREDS] Secret Key: '{}'", credentials.get("secret_key"));
-            if (credentials.containsKey("session_token")) {
-                logger.info("[DEBUG ICEBERG CREDS] Session Token: '{}'", credentials.get("session_token"));
-            }
-            logger.info("[DEBUG ICEBERG CREDS] Access Key Length: {}", credentials.get("access_key").length());
-            logger.info("[DEBUG ICEBERG CREDS] Secret Key Length: {}", credentials.get("secret_key").length());
-            if (credentials.containsKey("session_token")) {
-                logger.info("[DEBUG ICEBERG CREDS] Session Token Length: {}", credentials.get("session_token").length());
-            }
-            
-            logger.info("[Iceberg S3Tables] Successfully loaded {} credential(s) from: {}", 
-                       credentials.size(), filePath);
-        } catch (IOException e) {
-            String errorMsg = String.format("[Iceberg S3Tables] Failed to read credentials file: %s", filePath);
-            logger.error(errorMsg, e);
-            throw new RuntimeException(errorMsg, e);
-        }
-        
-        return credentials;
-    }
 }

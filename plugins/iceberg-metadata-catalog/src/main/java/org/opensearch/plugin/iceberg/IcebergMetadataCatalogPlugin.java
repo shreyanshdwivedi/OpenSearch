@@ -25,6 +25,7 @@ import org.opensearch.plugin.iceberg.rest.RestSyncIcebergAction;
 import org.opensearch.plugin.iceberg.service.IcebergService;
 import org.opensearch.plugins.ActionPlugin;
 import org.opensearch.plugins.Plugin;
+import org.opensearch.plugins.ReloadablePlugin;
 import org.opensearch.repositories.RepositoriesService;
 import org.opensearch.rest.RestController;
 import org.opensearch.rest.RestHandler;
@@ -42,7 +43,7 @@ import java.util.function.Supplier;
  * Plugin for managing Iceberg table metadata for OpenSearch indices.
  * Provides REST API to sync Parquet files from remote store to Iceberg catalogs (Glue or S3 Tables).
  */
-public class IcebergMetadataCatalogPlugin extends Plugin implements ActionPlugin {
+public class IcebergMetadataCatalogPlugin extends Plugin implements ActionPlugin, ReloadablePlugin {
 
     private IcebergService icebergService;
 
@@ -101,7 +102,20 @@ public class IcebergMetadataCatalogPlugin extends Plugin implements ActionPlugin
             IcebergService.CATALOG_TYPE_SETTING,
             IcebergService.S3_TABLES_BUCKET_ARN_SETTING,
             IcebergService.AWS_REGION_SETTING,
-            IcebergService.CREDENTIALS_FILE_PATH_SETTING
+            IcebergClientSettings.ACCESS_KEY_SETTING,
+            IcebergClientSettings.SECRET_KEY_SETTING,
+            IcebergClientSettings.SESSION_TOKEN_SETTING
         );
+    }
+
+    /**
+     * Called by {@code POST /_nodes/reload_secure_settings} — re-reads
+     * iceberg.client.* credentials from the keystore without a node restart.
+     */
+    @Override
+    public void reload(Settings settings) {
+        if (icebergService != null) {
+            icebergService.reloadCredentials(settings);
+        }
     }
 }

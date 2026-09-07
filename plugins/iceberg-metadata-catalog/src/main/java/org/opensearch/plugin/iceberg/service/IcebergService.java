@@ -22,6 +22,7 @@ import org.apache.logging.log4j.Logger;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.settings.Setting;
+import org.opensearch.plugin.iceberg.IcebergClientSettings;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.store.RemoteSegmentStoreDirectory;
@@ -74,11 +75,25 @@ public class IcebergService {
      * aws_secret_access_key=[secret access key]
      * aws_session_token=[session token]
      */
-    public static final Setting<String> CREDENTIALS_FILE_PATH_SETTING = Setting.simpleString(
-        "iceberg.credentials.file",
-        "/home/ec2-user/creds-iceberg/credentials.txt",
-        Setting.Property.NodeScope
-    );
+    /**
+     * Customer credentials for the S3 Tables catalog + warehouse (keystore:
+     * iceberg.client.default.*) and source credentials for reading the remote
+     * segment store (keystore: iceberg.client.source.*, falls back to default).
+     * Volatile: swapped atomically on secure-settings reload.
+     */
+    private volatile IcebergClientSettings.Creds customerCreds = IcebergClientSettings.Creds.EMPTY;
+    private volatile IcebergClientSettings.Creds sourceCreds = IcebergClientSettings.Creds.EMPTY;
+
+    /** (Re)load credentials from the keystore. Called at construction and on reload_secure_settings. */
+    public void reloadCredentials(Settings settingsWithKeystore) {
+        this.customerCreds = IcebergClientSettings.loadCreds(settingsWithKeystore, IcebergClientSettings.DEFAULT_CLIENT);
+        this.sourceCreds = IcebergClientSettings.loadSourceCreds(settingsWithKeystore);
+        logger.info(
+            "[Iceberg Plugin] Credentials loaded from keystore: customer configured={}, source configured={}",
+            customerCreds.isConfigured(),
+            sourceCreds.isConfigured()
+        );
+    }
 
     private final ClusterService clusterService;
     private final Supplier<RepositoriesService> repositoriesServiceSupplier;
@@ -99,6 +114,9 @@ public class IcebergService {
         
         // Create manager with settings (reads bucket ARN from configuration)
         this.s3TablesManager = new S3TablesIcebergManager(settings);
+
+        // Keystore is open during node construction — snapshot credentials now.
+        reloadCredentials(settings);
     }
 
     /**
@@ -828,70 +846,39 @@ public class IcebergService {
 
         RESTCatalog customerCatalog = null;
         try {
-            // Get file credentials to use for STS authentication
-            Map<String, String> fileCreds = s3TablesManager.getFileCredentials();
-            
-            // Build credentials provider from file
-            software.amazon.awssdk.auth.credentials.AwsCredentialsProvider credentialsProvider;
-            if (fileCreds.containsKey("access_key") && fileCreds.containsKey("secret_key")) {
-                software.amazon.awssdk.auth.credentials.AwsCredentials credentials;
-                if (fileCreds.containsKey("session_token")) {
-                    credentials = software.amazon.awssdk.auth.credentials.AwsSessionCredentials.create(
-                        fileCreds.get("access_key"),
-                        fileCreds.get("secret_key"),
-                        fileCreds.get("session_token")
+            // Resolve customer credentials:
+            //  1. keystore static creds (iceberg.client.default.*) — used directly, no STS
+            //  2. otherwise STS AssumeRole(role_arn) via the default provider chain
+            // Credentials are passed to the catalog as per-catalog properties (s3.* for
+            // FileIO, rest.* for the SigV4 REST signer) — never as JVM system properties,
+            // which are global, race across concurrent syncs, and leak to other clients.
+            final software.amazon.awssdk.auth.credentials.AwsCredentials resolvedCreds;
+            IcebergClientSettings.Creds keystoreCreds = this.customerCreds;
+            if (keystoreCreds.isConfigured()) {
+                logger.info("[Iceberg S3Tables] Using customer credentials from keystore (iceberg.client.default)");
+                resolvedCreds = keystoreCreds.toAwsCredentials();
+            } else {
+                logger.info("[Iceberg S3Tables] No keystore credentials — assuming role: {}", roleArn);
+                try (
+                    software.amazon.awssdk.services.sts.StsClient stsClient = software.amazon.awssdk.services.sts.StsClient.builder()
+                        .region(software.amazon.awssdk.regions.Region.of(region))
+                        .build()
+                ) {
+                    software.amazon.awssdk.services.sts.model.AssumeRoleResponse assumeRoleResponse = stsClient.assumeRole(
+                        software.amazon.awssdk.services.sts.model.AssumeRoleRequest.builder()
+                            .roleArn(roleArn)
+                            .roleSessionName("opensearch-iceberg-sync")
+                            .durationSeconds(3600)
+                            .build()
                     );
-                } else {
-                    credentials = software.amazon.awssdk.auth.credentials.AwsBasicCredentials.create(
-                        fileCreds.get("access_key"),
-                        fileCreds.get("secret_key")
+                    software.amazon.awssdk.services.sts.model.Credentials stsCreds = assumeRoleResponse.credentials();
+                    resolvedCreds = software.amazon.awssdk.auth.credentials.AwsSessionCredentials.create(
+                        stsCreds.accessKeyId(),
+                        stsCreds.secretAccessKey(),
+                        stsCreds.sessionToken()
                     );
+                    logger.info("[Iceberg S3Tables] Successfully assumed role");
                 }
-                credentialsProvider = software.amazon.awssdk.auth.credentials.StaticCredentialsProvider.create(credentials);
-                logger.info("[Iceberg S3Tables] Using file credentials for STS client");
-            } else {
-                throw new RuntimeException("File credentials not available for STS client");
-            }
-            
-            // Check if we're already using the target role
-            software.amazon.awssdk.services.sts.StsClient stsClient = software.amazon.awssdk.services.sts.StsClient.builder()
-                .region(software.amazon.awssdk.regions.Region.of(region))
-                .credentialsProvider(credentialsProvider)
-                .build();
-
-            software.amazon.awssdk.services.sts.model.GetCallerIdentityResponse callerIdentity =
-                stsClient.getCallerIdentity();
-            String currentArn = callerIdentity.arn();
-
-            logger.info("[Iceberg S3Tables] Current identity: {}", currentArn);
-
-            // If already using target role, skip AssumeRole
-            if (currentArn.contains(roleArn.substring(roleArn.lastIndexOf('/') + 1))) {
-                logger.info("[Iceberg S3Tables] Already using target role, skipping AssumeRole");
-                // Use existing credentials from default chain
-            } else {
-                // Assume customer role
-                logger.info("[Iceberg S3Tables] Assuming role: {}", roleArn);
-
-                software.amazon.awssdk.services.sts.model.AssumeRoleRequest assumeRoleRequest =
-                    software.amazon.awssdk.services.sts.model.AssumeRoleRequest.builder()
-                        .roleArn(roleArn)
-                        .roleSessionName("opensearch-iceberg-sync")
-                        .durationSeconds(3600)
-                        .build();
-
-                software.amazon.awssdk.services.sts.model.AssumeRoleResponse assumeRoleResponse =
-                    stsClient.assumeRole(assumeRoleRequest);
-
-                software.amazon.awssdk.services.sts.model.Credentials credentials = assumeRoleResponse.credentials();
-
-                logger.info("[Iceberg S3Tables] Successfully assumed role");
-
-                // Set AWS credentials as system properties
-                System.setProperty("aws.accessKeyId", credentials.accessKeyId());
-                System.setProperty("aws.secretAccessKey", credentials.secretAccessKey());
-                System.setProperty("aws.sessionToken", credentials.sessionToken());
-                System.setProperty("aws.region", region);
             }
 
             // Extract account ID from role ARN
@@ -914,6 +901,16 @@ public class IcebergService {
             properties.put("rest.sigv4-enabled", "true");
             properties.put("rest.signing-name", "s3tables");
             properties.put("rest.signing-region", region);
+
+            // Per-catalog credentials: S3FileIO (warehouse writes) + REST SigV4 signer (catalog calls)
+            properties.put("s3.access-key-id", resolvedCreds.accessKeyId());
+            properties.put("s3.secret-access-key", resolvedCreds.secretAccessKey());
+            properties.put("rest.access-key-id", resolvedCreds.accessKeyId());
+            properties.put("rest.secret-access-key", resolvedCreds.secretAccessKey());
+            if (resolvedCreds instanceof software.amazon.awssdk.auth.credentials.AwsSessionCredentials sessionCreds) {
+                properties.put("s3.session-token", sessionCreds.sessionToken());
+                properties.put("rest.session-token", sessionCreds.sessionToken());
+            }
 
             ClassLoader originalClassLoader = Thread.currentThread().getContextClassLoader();
             Thread.currentThread().setContextClassLoader(S3TablesIcebergManager.class.getClassLoader());
@@ -993,51 +990,32 @@ public class IcebergService {
     }
 
     /**
-     * Create source FileIO with credentials from file.
+     * Create source FileIO for reading the remote segment store, using keystore
+     * credentials (iceberg.client.source.*, falling back to iceberg.client.default.*).
+     * Falls back to the AWS default provider chain when no keystore creds are set
+     * (e.g. instance-profile deployments).
      */
     private org.apache.iceberg.aws.s3.S3FileIO createSourceFileIO() {
         String sourceRegion = getSourceBucketRegion();
         logger.info("[Iceberg Plugin] Creating source FileIO with region: {}", sourceRegion);
-        
-        // Get credentials from file (loaded by S3TablesIcebergManager)
-        Map<String, String> fileCreds = s3TablesManager.getFileCredentials();
-        
-        if (!fileCreds.containsKey("access_key") || !fileCreds.containsKey("secret_key")) {
-            throw new RuntimeException("Iceberg credentials not found in file. " +
-                "Please ensure credentials file exists at configured path with required keys: " +
-                "aws_access_key_id, aws_secret_access_key");
-        }
-        
-        // Create credentials from file
-        software.amazon.awssdk.auth.credentials.AwsCredentials credentials;
-        if (fileCreds.containsKey("session_token")) {
-            credentials = software.amazon.awssdk.auth.credentials.AwsSessionCredentials.create(
-                fileCreds.get("access_key"),
-                fileCreds.get("secret_key"),
-                fileCreds.get("session_token")
+
+        IcebergClientSettings.Creds creds = this.sourceCreds;
+        software.amazon.awssdk.services.s3.S3ClientBuilder clientBuilder = software.amazon.awssdk.services.s3.S3Client.builder()
+            .region(software.amazon.awssdk.regions.Region.of(sourceRegion));
+        if (creds.isConfigured()) {
+            logger.info("[Iceberg Plugin] Using source credentials from keystore");
+            clientBuilder.credentialsProvider(
+                software.amazon.awssdk.auth.credentials.StaticCredentialsProvider.create(creds.toAwsCredentials())
             );
-            logger.info("[Iceberg Plugin] Using session credentials from file");
         } else {
-            credentials = software.amazon.awssdk.auth.credentials.AwsBasicCredentials.create(
-                fileCreds.get("access_key"),
-                fileCreds.get("secret_key")
-            );
-            logger.info("[Iceberg Plugin] Using basic credentials from file");
+            logger.info("[Iceberg Plugin] No keystore source credentials — using default provider chain");
         }
-        
-        logger.info("[Iceberg Plugin] Using credentials with accessKeyId: {}...",
-                   credentials.accessKeyId().substring(0, Math.min(4, credentials.accessKeyId().length())));
-        
-        // Create S3 client with file credentials
-        software.amazon.awssdk.services.s3.S3Client s3Client = software.amazon.awssdk.services.s3.S3Client.builder()
-            .region(software.amazon.awssdk.regions.Region.of(sourceRegion))
-            .credentialsProvider(software.amazon.awssdk.auth.credentials.StaticCredentialsProvider.create(credentials))
-            .build();
-        
+        software.amazon.awssdk.services.s3.S3Client s3Client = clientBuilder.build();
+
         // Create custom S3FileIO that uses our pre-configured S3 client
         org.apache.iceberg.aws.s3.S3FileIO sourceFileIO = new org.apache.iceberg.aws.s3.S3FileIO(() -> s3Client);
         sourceFileIO.initialize(new HashMap<>());
-        
+
         return sourceFileIO;
     }
 
