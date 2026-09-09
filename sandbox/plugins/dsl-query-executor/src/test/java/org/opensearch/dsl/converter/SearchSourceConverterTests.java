@@ -29,6 +29,7 @@ import org.opensearch.dsl.golden.GoldenTestCase;
 import org.opensearch.search.SearchModule;
 import org.opensearch.search.aggregations.BucketOrder;
 import org.opensearch.search.aggregations.bucket.terms.TermsAggregationBuilder;
+import org.opensearch.search.aggregations.bucket.range.RangeAggregationBuilder;
 import org.opensearch.search.aggregations.metrics.AvgAggregationBuilder;
 import org.opensearch.search.builder.SearchSourceBuilder;
 import org.opensearch.test.OpenSearchTestCase;
@@ -410,6 +411,24 @@ public class SearchSourceConverterTests extends OpenSearchTestCase {
 
     public void testNanoTimestampTypeSystemReportsMaxPrecisionNine() {
         assertEquals(9, DslTypeSystems.NANO_TIMESTAMP.getMaxPrecision(SqlTypeName.TIMESTAMP));
+    }
+
+    public void testRangeAggregationOnNonNumericFieldIsRejected() {
+        // 'brand' is a VARCHAR (keyword) field — a range aggregation over it cannot be cast to a
+        // numeric ordinal, so conversion must fail loudly rather than deep in CAST(... AS DOUBLE).
+        SearchSourceBuilder source = new SearchSourceBuilder().size(0)
+            .aggregation(new RangeAggregationBuilder("brand_ranges").field("brand").addRange(0, 100).addRange(100, 200));
+        ConversionException e = expectThrows(ConversionException.class, () -> converter.convert(source, "test-index"));
+        assertTrue("message should name the field", e.getMessage().contains("brand"));
+        assertTrue("message should mention numeric requirement", e.getMessage().contains("numeric"));
+    }
+
+    public void testRangeAggregationOnNumericFieldConverts() throws ConversionException {
+        // 'price' is INTEGER — the same aggregation converts without error.
+        SearchSourceBuilder source = new SearchSourceBuilder().size(0)
+            .aggregation(new RangeAggregationBuilder("price_ranges").field("price").addRange(0, 100).addRange(100, 200));
+        QueryPlans plans = converter.convert(source, "test-index");
+        assertTrue(plans.has(QueryPlans.Type.AGGREGATION));
     }
 
     private SearchSourceBuilder parseSearchSource(Map<String, Object> inputDsl) throws IOException {

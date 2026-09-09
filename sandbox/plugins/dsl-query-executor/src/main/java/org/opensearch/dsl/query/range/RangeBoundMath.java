@@ -190,7 +190,7 @@ public final class RangeBoundMath {
     }
 
     /** Returns true if the SqlTypeName represents a numeric type. */
-    static boolean isNumericType(SqlTypeName typeName) {
+    public static boolean isNumericType(SqlTypeName typeName) {
         return typeName == SqlTypeName.INTEGER
             || typeName == SqlTypeName.BIGINT
             || typeName == SqlTypeName.SMALLINT

@@ -20,6 +20,7 @@ import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.opensearch.dsl.aggregation.AggregationMetadata;
 import org.opensearch.dsl.aggregation.ExpressionGrouping;
+import org.opensearch.dsl.query.range.RangeBoundMath;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -71,6 +72,19 @@ public class ComputedGroupingConverter extends AbstractDslConverter {
             RelDataTypeField source = rowType.getField(grouping.getSourceField(), false, false);
             if (source == null) {
                 throw new ConversionException("Range field '" + grouping.getSourceField() + "' not found in schema");
+            }
+            // Range bucketing casts the field to DOUBLE; a non-numeric field (e.g. keyword) would
+            // otherwise fail deep in the CAST. Reject it here with a clear message, matching classic
+            // search, which rejects non-numeric fields via the ValuesSource registry.
+            SqlTypeName sourceType = source.getType().getSqlTypeName();
+            if (!RangeBoundMath.isNumericType(sourceType)) {
+                throw new ConversionException(
+                    "Range aggregation on field ["
+                        + grouping.getSourceField()
+                        + "] requires a numeric field type, but got ["
+                        + sourceType
+                        + "]"
+                );
             }
             RexNode fieldAsDouble = rexBuilder.makeCast(doubleType, rexBuilder.makeInputRef(source.getType(), source.getIndex()));
             projects.add(ordinalCase(rexBuilder, doubleType, intType, fieldAsDouble, grouping.getBounds()));
