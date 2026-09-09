@@ -41,24 +41,37 @@ public class DslQueryPlanExecutor {
     // TODO: add per-plan error handling so a failure in one plan
     // doesn't prevent returning partial results from other plans (e.g. HITS)
     /**
+     * Executes all plans without profiling. Equivalent to {@link #execute(QueryPlans, boolean, ActionListener)}
+     * with {@code profile = false}.
+     */
+    public void execute(QueryPlans plans, ActionListener<List<ExecutionResult>> listener) {
+        execute(plans, false, listener);
+    }
+
+    /**
      * Executes all plans sequentially and delivers results, in plan order, to the listener.
      *
      * <p>Plans run one-at-a-time: plan {@code N+1} is dispatched only after plan {@code N}
      * completes successfully. The first failure aborts the chain — the listener fires
      * {@code onFailure} with that error and remaining plans do not run.
      *
+     * <p>When {@code profile} is true, each plan runs via {@link QueryPlanExecutor#executeWithProfile}
+     * and its {@link ExecutionResult} carries the engine's profile.
+     *
      * @param plans    the query plans to execute
+     * @param profile  whether to capture the engine's execution profile per plan
      * @param listener receives the ordered list of results on success, or the first failure
      */
-    public void execute(QueryPlans plans, ActionListener<List<ExecutionResult>> listener) {
+    public void execute(QueryPlans plans, boolean profile, ActionListener<List<ExecutionResult>> listener) {
         List<QueryPlans.QueryPlan> queryPlans = plans.getAll();
         List<ExecutionResult> results = new ArrayList<>(queryPlans.size());
-        executeNext(queryPlans, 0, results, listener);
+        executeNext(queryPlans, 0, profile, results, listener);
     }
 
     private void executeNext(
         List<QueryPlans.QueryPlan> queryPlans,
         int index,
+        boolean profile,
         List<ExecutionResult> results,
         ActionListener<List<ExecutionResult>> outer
     ) {
@@ -70,11 +83,34 @@ public class DslQueryPlanExecutor {
         RelNode relNode = plan.relNode();
         logPlan(relNode);
         // TODO: context param is null, may carry execution hints
+        if (profile) {
+            // executeWithProfile delivers failures via onResponse with a populated profile;
+            // match the non-profile path's semantics: first failure aborts the chain.
+            executor.executeWithProfile(relNode, null, ActionListener.wrap(profiled -> {
+                if (profiled.isSuccess() == false) {
+                    outer.onFailure(asException(profiled.failure()));
+                    return;
+                }
+                logRows(profiled.rows());
+                results.add(new ExecutionResult(plan, profiled.rows(), profiled.profile()));
+                executeNext(queryPlans, index + 1, profile, results, outer);
+            }, outer::onFailure));
+            return;
+        }
         executor.execute(relNode, null, ActionListener.wrap(rows -> {
             logRows(rows);
             results.add(new ExecutionResult(plan, rows));
-            executeNext(queryPlans, index + 1, results, outer);
+            executeNext(queryPlans, index + 1, profile, results, outer);
         }, outer::onFailure));
+    }
+
+    // executeWithProfile signals failure through ProfiledResult.failure() rather than the
+    // listener's onFailure. Errors (OOM etc.) must propagate, not be delivered as a response.
+    private static Exception asException(Throwable t) {
+        if (t instanceof Error error) {
+            throw error;
+        }
+        return t instanceof Exception ? (Exception) t : new RuntimeException(t);
     }
 
     private static void logRows(Iterable<Object[]> rows) {

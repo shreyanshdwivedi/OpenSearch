@@ -20,9 +20,16 @@ import org.opensearch.search.SearchHit;
 import org.opensearch.search.SearchHits;
 import org.opensearch.search.aggregations.InternalAggregations;
 import org.opensearch.search.internal.SearchContext;
+import org.opensearch.search.profile.NetworkTime;
+import org.opensearch.search.profile.ProfileShardResult;
+import org.opensearch.search.profile.SearchProfileShardResults;
+import org.opensearch.search.profile.aggregation.AggregationProfileShardResult;
+import org.opensearch.search.profile.fetch.FetchProfileShardResult;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
@@ -52,8 +59,9 @@ public class SearchResponseBuilder {
         CountTotals countTotals = extractCountTotals(results);
         SearchHits hits = buildHits(results, request, countTotals);
         InternalAggregations aggregations = buildAggregations(results, request, registry, countTotals);
+        SearchProfileShardResults profileResults = buildProfileResults(results);
 
-        SearchResponseSections sections = new SearchResponseSections(hits, aggregations, null, false, null, null, 0);
+        SearchResponseSections sections = new SearchResponseSections(hits, aggregations, null, false, null, profileResults, 0);
 
         // TODO: shard counts, timed_out, and engine-side took require execution metadata from
         // the analytics plugin (returned alongside rows). Until then report a constant 1/1 —
@@ -64,6 +72,32 @@ public class SearchResponseBuilder {
     private static CountTotals extractCountTotals(List<ExecutionResult> results) {
         List<ExecutionResult> countResults = results.stream().filter(r -> r.getType() == QueryPlans.Type.COUNT).toList();
         return countResults.isEmpty() ? null : CountTotals.from(countResults);
+    }
+
+    /**
+     * Builds the profile section when profiling was requested (results carry engine profiles),
+     * else null so no {@code profile} key is rendered. The analytics engine has no per-shard
+     * fan-out, so profiles from all executed plans (ordered HITS, AGGREGATION, COUNT for stable
+     * output) attach to a single synthetic shard entry as {@code analytics_profile}; the classic
+     * Lucene profile fields on that entry stay empty.
+     */
+    private static SearchProfileShardResults buildProfileResults(List<ExecutionResult> results) {
+        List<AnalyticsShardProfile.PlanProfile> profiles = results.stream()
+            .filter(r -> r.getProfile() != null)
+            .sorted(Comparator.comparing(ExecutionResult::getType))
+            .map(r -> new AnalyticsShardProfile.PlanProfile(r.getType(), r.getProfile()))
+            .toList();
+        if (profiles.isEmpty()) {
+            return null;
+        }
+        ProfileShardResult shardResult = new ProfileShardResult(
+            List.of(),
+            new AggregationProfileShardResult(List.of()),
+            new FetchProfileShardResult(List.of()),
+            new NetworkTime(0, 0)
+        );
+        shardResult.setPluggableProfile(new AnalyticsShardProfile(profiles));
+        return new SearchProfileShardResults(Map.of("[analytics][0]", shardResult));
     }
 
     /**

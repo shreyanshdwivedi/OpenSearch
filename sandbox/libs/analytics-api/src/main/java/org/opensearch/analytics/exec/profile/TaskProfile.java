@@ -8,6 +8,9 @@
 
 package org.opensearch.analytics.exec.profile;
 
+import org.opensearch.core.common.io.stream.StreamInput;
+import org.opensearch.core.common.io.stream.StreamOutput;
+import org.opensearch.core.common.io.stream.Writeable;
 import org.opensearch.core.xcontent.ToXContentObject;
 import org.opensearch.core.xcontent.XContentBuilder;
 
@@ -27,11 +30,26 @@ import java.util.Map;
  */
 public record TaskProfile(String node, String state, long elapsedMs, Map<String, Long> dataNodeMetrics, String physicalPlan)
     implements
-        ToXContentObject {
+        ToXContentObject,
+        Writeable {
 
     /** Convenience constructor without data node metrics or physical plan. */
     public TaskProfile(String node, String state, long elapsedMs) {
         this(node, state, elapsedMs, null, null);
+    }
+
+    /** Reads a task profile from a stream. */
+    public TaskProfile(StreamInput in) throws IOException {
+        this(in.readString(), in.readString(), in.readVLong(), in.readMap(StreamInput::readString, StreamInput::readLong), in.readOptionalString());
+    }
+
+    @Override
+    public void writeTo(StreamOutput out) throws IOException {
+        out.writeString(node);
+        out.writeString(state);
+        out.writeVLong(elapsedMs);
+        out.writeMap(dataNodeMetrics == null ? Map.of() : dataNodeMetrics, StreamOutput::writeString, StreamOutput::writeLong);
+        out.writeOptionalString(physicalPlan);
     }
 
     @Override

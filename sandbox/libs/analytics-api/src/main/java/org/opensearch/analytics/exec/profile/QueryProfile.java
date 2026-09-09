@@ -8,6 +8,9 @@
 
 package org.opensearch.analytics.exec.profile;
 
+import org.opensearch.core.common.io.stream.StreamInput;
+import org.opensearch.core.common.io.stream.StreamOutput;
+import org.opensearch.core.common.io.stream.Writeable;
 import org.opensearch.core.xcontent.ToXContentObject;
 import org.opensearch.core.xcontent.XContentBuilder;
 
@@ -29,7 +32,22 @@ import java.util.List;
  */
 public record QueryProfile(String queryId, List<String> fullPlan, long planningTimeMs, long executionTimeMs, List<StageProfile> stages)
     implements
-        ToXContentObject {
+        ToXContentObject,
+        Writeable {
+
+    /** Reads a query profile from a stream. */
+    public QueryProfile(StreamInput in) throws IOException {
+        this(in.readString(), in.readStringList(), in.readVLong(), in.readVLong(), in.readList(StageProfile::new));
+    }
+
+    @Override
+    public void writeTo(StreamOutput out) throws IOException {
+        out.writeString(queryId);
+        out.writeStringCollection(fullPlan == null ? List.of() : fullPlan);
+        out.writeVLong(planningTimeMs);
+        out.writeVLong(executionTimeMs);
+        out.writeCollection(stages);
+    }
 
     @Override
     public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {

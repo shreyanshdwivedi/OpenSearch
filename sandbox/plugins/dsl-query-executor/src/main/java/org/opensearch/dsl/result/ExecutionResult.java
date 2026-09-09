@@ -8,6 +8,7 @@
 
 package org.opensearch.dsl.result;
 
+import org.opensearch.analytics.exec.profile.QueryProfile;
 import org.opensearch.dsl.executor.QueryPlans;
 
 import java.util.List;
@@ -21,6 +22,7 @@ public final class ExecutionResult {
 
     private final QueryPlans.QueryPlan plan;
     private final Iterable<Object[]> rows;
+    private final QueryProfile profile;
 
     /**
      * Creates a result for the given plan and rows.
@@ -29,8 +31,20 @@ public final class ExecutionResult {
      * @param rows result rows from the executor
      */
     public ExecutionResult(QueryPlans.QueryPlan plan, Iterable<Object[]> rows) {
+        this(plan, rows, null);
+    }
+
+    /**
+     * Creates a result carrying the engine's execution profile.
+     *
+     * @param plan the plan that produced this result
+     * @param rows result rows from the executor
+     * @param profile engine profile captured for this plan, or null when profiling was not requested
+     */
+    public ExecutionResult(QueryPlans.QueryPlan plan, Iterable<Object[]> rows, QueryProfile profile) {
         this.plan = Objects.requireNonNull(plan, "plan must not be null");
         this.rows = Objects.requireNonNull(rows, "rows must not be null");
+        this.profile = profile;
     }
 
     /** Returns the plan that produced this result. */
@@ -46,6 +60,11 @@ public final class ExecutionResult {
     /** Returns the result rows from the executor. */
     public Iterable<Object[]> getRows() {
         return rows;
+    }
+
+    /** Returns the engine profile for this plan, or null when profiling was not requested. */
+    public QueryProfile getProfile() {
+        return profile;
     }
 
     /** Column names derived from the plan's RelNode row type. */

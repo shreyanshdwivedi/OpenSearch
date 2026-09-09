@@ -11,6 +11,7 @@ package org.opensearch.dsl.result;
 import org.apache.lucene.search.TotalHits;
 import org.opensearch.action.search.SearchRequest;
 import org.opensearch.action.search.SearchResponse;
+import org.opensearch.analytics.exec.profile.QueryProfile;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.xcontent.XContentHelper;
 import org.opensearch.common.xcontent.json.JsonXContent;
@@ -23,6 +24,7 @@ import org.opensearch.dsl.aggregation.AggregationRegistry;
 import org.opensearch.dsl.converter.ConversionException;
 import org.opensearch.dsl.converter.SearchSourceConverter;
 import org.opensearch.dsl.executor.QueryPlans;
+import org.opensearch.dsl.TestUtils;
 import org.opensearch.dsl.golden.CalciteTestInfra;
 import org.opensearch.dsl.golden.GoldenFileLoader;
 import org.opensearch.dsl.golden.GoldenTestCase;
@@ -76,6 +78,39 @@ public class SearchResponseBuilderTests extends OpenSearchTestCase {
         assertEquals(200, response.status().getStatus());
         assertEquals(100L, response.getTook().millis());
         assertNull(response.getAggregations());
+    }
+
+    public void testProfiledResultsRenderUnderProfileShards() throws Exception {
+        SearchRequest request = new SearchRequest();
+        request.source(new SearchSourceBuilder().profile(true));
+        QueryPlans.QueryPlan plan = new QueryPlans.QueryPlan(QueryPlans.Type.HITS, TestUtils.createTestRelNode());
+        QueryProfile profile = new QueryProfile("q42", List.of("LogicalTableScan"), 5L, 11L, List.of());
+        ExecutionResult result = new ExecutionResult(plan, List.of(), profile);
+
+        SearchResponse response = SearchResponseBuilder.build(List.of(result), request, new AggregationRegistry(), 1L);
+
+        String json = response.toString();
+        assertTrue("expected profile section in: " + json, json.contains("\"profile\""));
+        assertTrue(json.contains("\"shards\""));
+        assertTrue(json.contains("\"analytics_profile\""));
+        assertTrue(json.contains("\"plan_type\":\"HITS\""));
+        assertTrue(json.contains("\"query_id\":\"q42\""));
+        assertTrue(json.contains("\"planning_time_ms\":5"));
+        // analytics profile lives inside a shard entry, not under ext
+        assertFalse(json.contains("\"ext\""));
+    }
+
+    public void testNoProfilesMeansNoProfileSection() throws Exception {
+        SearchRequest request = new SearchRequest();
+        request.source(new SearchSourceBuilder());
+        QueryPlans.QueryPlan plan = new QueryPlans.QueryPlan(QueryPlans.Type.HITS, TestUtils.createTestRelNode());
+        ExecutionResult result = new ExecutionResult(plan, List.of());
+
+        SearchResponse response = SearchResponseBuilder.build(List.of(result), request, new AggregationRegistry(), 1L);
+
+        String json = response.toString();
+        assertFalse(json.contains("\"profile\""));
+        assertFalse(json.contains("\"ext\""));
     }
 
     public void testBuildWithNullSource() throws Exception {

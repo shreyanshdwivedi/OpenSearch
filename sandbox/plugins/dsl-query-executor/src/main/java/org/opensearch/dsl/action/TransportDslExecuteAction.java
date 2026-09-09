@@ -154,11 +154,13 @@ public class TransportDslExecuteAction extends HandledTransportAction<SearchRequ
             }
         }
         final QueryPlans mainPlans = mainBuilder.build();
+        final boolean profile = request.source() != null && request.source().profile();
 
         if (countPlans.isEmpty()) {
             try {
                 planExecutor.execute(
                     mainPlans,
+                    profile,
                     ActionListener.wrap(results -> buildAndRespond(results, request, converter, startNanos, listener), listener::onFailure)
                 );
             } catch (Exception e) {
@@ -177,14 +179,14 @@ public class TransportDslExecuteAction extends HandledTransportAction<SearchRequ
         }, listener::onFailure), 1 + countPlans.size());
 
         try {
-            planExecutor.execute(mainPlans, joined);
+            planExecutor.execute(mainPlans, profile, joined);
         } catch (Exception e) {
             joined.onFailure(e);
         }
 
         for (QueryPlans.QueryPlan countPlan : countPlans) {
             try {
-                planExecutor.execute(new QueryPlans.Builder().add(countPlan).build(), joined);
+                planExecutor.execute(new QueryPlans.Builder().add(countPlan).build(), profile, joined);
             } catch (Exception e) {
                 joined.onFailure(e);
             }

@@ -62,6 +62,8 @@ public class ProfileShardResult implements Writeable {
 
     private NetworkTime networkTime;
 
+    private PluggableShardProfile pluggableProfile;
+
     public ProfileShardResult(
         List<QueryProfileShardResult> queryProfileResults,
         AggregationProfileShardResult aggProfileShardResult,
@@ -102,6 +104,9 @@ public class ProfileShardResult implements Writeable {
             this.fetchProfileResult = new FetchProfileShardResult(Collections.emptyList());
         }
         this.networkTime = new NetworkTime(in);
+        if (in.getVersion().onOrAfter(Version.V_3_9_0)) {
+            this.pluggableProfile = in.readOptionalNamedWriteable(PluggableShardProfile.class);
+        }
     }
 
     @Override
@@ -115,6 +120,9 @@ public class ProfileShardResult implements Writeable {
             fetchProfileResult.writeTo(out);
         }
         networkTime.writeTo(out);
+        if (out.getVersion().onOrAfter(Version.V_3_9_0)) {
+            out.writeOptionalNamedWriteable(pluggableProfile);
+        }
     }
 
     public List<QueryProfileShardResult> getQueryProfileResults() {
@@ -136,6 +144,15 @@ public class ProfileShardResult implements Writeable {
     public void setNetworkTime(NetworkTime newTime) {
         networkTime.setInboundNetworkTime(newTime.getInboundNetworkTime());
         networkTime.setOutboundNetworkTime(newTime.getOutboundNetworkTime());
+    }
+
+    /** Engine-specific profile section rendered inside this shard's entry, or null if none. */
+    public PluggableShardProfile getPluggableProfile() {
+        return pluggableProfile;
+    }
+
+    public void setPluggableProfile(PluggableShardProfile pluggableProfile) {
+        this.pluggableProfile = pluggableProfile;
     }
 
 }

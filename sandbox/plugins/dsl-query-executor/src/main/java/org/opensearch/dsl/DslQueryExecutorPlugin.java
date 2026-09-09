@@ -18,12 +18,14 @@ import org.opensearch.core.xcontent.NamedXContentRegistry;
 import org.opensearch.dsl.action.DslExecuteAction;
 import org.opensearch.dsl.action.SearchActionFilter;
 import org.opensearch.dsl.action.TransportDslExecuteAction;
+import org.opensearch.dsl.result.AnalyticsShardProfile;
 import org.opensearch.env.Environment;
 import org.opensearch.env.NodeEnvironment;
 import org.opensearch.plugins.ActionPlugin;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.repositories.RepositoriesService;
 import org.opensearch.script.ScriptService;
+import org.opensearch.search.profile.PluggableShardProfile;
 import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.client.Client;
 import org.opensearch.transport.client.node.NodeClient;
@@ -71,5 +73,14 @@ public class DslQueryExecutorPlugin extends Plugin implements ActionPlugin {
     @Override
     public List<ActionFilter> getActionFilters() {
         return searchActionFilter != null ? List.of(searchActionFilter) : List.of();
+    }
+
+    @Override
+    public List<NamedWriteableRegistry.Entry> getNamedWriteables() {
+        // Registers the analytics profile so a node deserializing a SearchResponse can resolve
+        // the PluggableShardProfile carried inside profile.shards[] on the analytics path.
+        return List.of(
+            new NamedWriteableRegistry.Entry(PluggableShardProfile.class, AnalyticsShardProfile.NAME, AnalyticsShardProfile::new)
+        );
     }
 }

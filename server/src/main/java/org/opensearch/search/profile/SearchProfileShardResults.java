@@ -120,6 +120,9 @@ public final class SearchProfileShardResults implements Writeable, ToXContentFra
             builder.endArray();
             profileShardResult.getAggregationProfileResults().toXContent(builder, params);
             profileShardResult.getFetchProfileResult().toXContent(builder, params);
+            if (profileShardResult.getPluggableProfile() != null) {
+                profileShardResult.getPluggableProfile().toXContent(builder, params);
+            }
             builder.endObject();
         }
         builder.endArray().endObject();

@@ -8,6 +8,9 @@
 
 package org.opensearch.analytics.exec.profile;
 
+import org.opensearch.core.common.io.stream.StreamInput;
+import org.opensearch.core.common.io.stream.StreamOutput;
+import org.opensearch.core.common.io.stream.Writeable;
 import org.opensearch.core.xcontent.ToXContentObject;
 import org.opensearch.core.xcontent.XContentBuilder;
 
@@ -41,7 +44,45 @@ import java.util.List;
  */
 public record StageProfile(int stageId, String executionType, String distribution, String state, long startMs, long endMs, long elapsedMs,
     long rowsProcessed, long tasksCompleted, long tasksFailed, List<String> fragment, String chosenBackend, String treeShape, List<
-        TaskProfile> tasks) implements ToXContentObject {
+        TaskProfile> tasks) implements ToXContentObject, Writeable {
+
+    /** Reads a stage profile from a stream. */
+    public StageProfile(StreamInput in) throws IOException {
+        this(
+            in.readVInt(),
+            in.readString(),
+            in.readOptionalString(),
+            in.readString(),
+            in.readVLong(),
+            in.readVLong(),
+            in.readVLong(),
+            in.readVLong(),
+            in.readVLong(),
+            in.readVLong(),
+            in.readStringList(),
+            in.readOptionalString(),
+            in.readOptionalString(),
+            in.readList(TaskProfile::new)
+        );
+    }
+
+    @Override
+    public void writeTo(StreamOutput out) throws IOException {
+        out.writeVInt(stageId);
+        out.writeString(executionType);
+        out.writeOptionalString(distribution);
+        out.writeString(state);
+        out.writeVLong(startMs);
+        out.writeVLong(endMs);
+        out.writeVLong(elapsedMs);
+        out.writeVLong(rowsProcessed);
+        out.writeVLong(tasksCompleted);
+        out.writeVLong(tasksFailed);
+        out.writeStringCollection(fragment == null ? List.of() : fragment);
+        out.writeOptionalString(chosenBackend);
+        out.writeOptionalString(treeShape);
+        out.writeCollection(tasks);
+    }
 
     @Override
     public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
